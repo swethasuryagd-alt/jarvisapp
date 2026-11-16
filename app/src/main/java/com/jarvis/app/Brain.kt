@@ -58,7 +58,7 @@ object Brain {
     }
 
     private fun launch(c: Context, pkg: String): Boolean = try {
-        val i = c.packageManager.getLaunchIntentForPackage(pkg) ?: return false
+        val i = c.packageManager.getLaunchIntentForPackage(pkg) ?: throw Exception("x")
         i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         (JarvisAccess.inst ?: c).startActivity(i)
         true
