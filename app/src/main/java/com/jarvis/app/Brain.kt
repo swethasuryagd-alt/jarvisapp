@@ -13,6 +13,8 @@ object Brain {
 
     fun prefs(c: Context) = c.getSharedPreferences("jarvis", Context.MODE_PRIVATE)
 
+    fun clearHistory() { history.clear() }
+
     fun handle(c: Context, raw: String): String =
         try { run(c, raw) } catch (e: Exception) { "Error: ${e.message}" }
 

@@ -8,6 +8,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Download wake-word model
+        run: |
+          mkdir -p app/src/main/assets
+          curl -L -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
+          unzip -q model.zip
+          mv vosk-model-small-en-us-0.15 app/src/main/assets/model
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
