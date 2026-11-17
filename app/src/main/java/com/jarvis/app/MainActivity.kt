@@ -285,13 +285,13 @@ class MainActivity : Activity() {
     }
 
     private fun goHome() {
-        Voice.stop()
+        Speaker.stop()
         setStatus(null)
         setMode(false)
     }
 
     private fun newChat() {
-        Voice.stop()
+        Speaker.stop()
         Brain.clearHistory()
         chatList.removeAllViews()
         setStatus(null)
@@ -337,7 +337,7 @@ class MainActivity : Activity() {
     private fun finishReply(reply: String, speak: Boolean) {
         if (reply.isBlank()) { setStatus(null); return }
         if (speak) {
-            Voice.speak(this, reply)
+            Speaker.speak(this, reply)
             setStatus("Jarvis is speaking", 0.9f, false)
             ui.postDelayed({ setStatus(null) }, minOf(9000L, 1500L + reply.length * 55L))
         } else {
@@ -382,7 +382,7 @@ class MainActivity : Activity() {
             addMessage("Jarvis", "Add your Groq key in settings (gear icon) first.")
             return
         }
-        Voice.stop()
+        Speaker.stop()
         setMode(true)
         setStatus("Listening…", 0.8f, true)
         Thread {
@@ -429,6 +429,27 @@ class MainActivity : Activity() {
 
     // --------------------------------------------------------------- settings
 
+    private fun pickVoice() {
+        Speaker.voices(this) { list ->
+            runOnUiThread {
+                if (list.isEmpty()) {
+                    Toast.makeText(this, "No voices found. Install voices in Settings > Text-to-speech.", Toast.LENGTH_LONG).show()
+                    return@runOnUiThread
+                }
+                val sorted = list.sortedWith(compareBy({ it.locale.displayName }, { it.name }))
+                val labels = sorted.map { it.locale.displayName + " - " + it.name }.toTypedArray()
+                AlertDialog.Builder(this, android.R.style.Theme_Material_Dialog_Alert)
+                    .setTitle("Choose a voice")
+                    .setItems(labels) { _, which ->
+                        val name = sorted[which].name
+                        Brain.prefs(this).edit().putString("voice", name).apply()
+                        Speaker.preview(this, name)
+                    }
+                    .show()
+            }
+        }
+    }
+
     private fun showSettings() {
         val p = Brain.prefs(this)
         val box = LinearLayout(this)
@@ -443,8 +464,27 @@ class MainActivity : Activity() {
         cutoff.hint = "Auto-off battery %"
         cutoff.setText(p.getInt("cutoff", 30).toString())
         cutoff.inputType = InputType.TYPE_CLASS_NUMBER
+        fun field(hint: String, value: String): EditText {
+            val e = EditText(this)
+            e.hint = hint
+            e.setText(value)
+            e.setSingleLine()
+            return e
+        }
+        val model = field("AI model", p.getString("model", "") ?: "")
+        model.hint = "AI model (blank = openai/gpt-oss-120b)"
+        val stt = field("Speech model", p.getString("stt", "") ?: "")
+        stt.hint = "Speech model (blank = whisper-large-v3)"
+        val rate = field("Voice speed", p.getFloat("rate", 1.0f).toString())
+        rate.hint = "Voice speed (1.0 = normal)"
+        val pitch = field("Voice pitch", p.getFloat("pitch", 1.0f).toString())
+        pitch.hint = "Voice pitch (1.0 = normal, lower = deeper)"
         fun save() {
             p.edit().putString("groq", groq.text.toString().trim())
+                .putString("model", model.text.toString().trim())
+                .putString("stt", stt.text.toString().trim())
+                .putFloat("rate", rate.text.toString().toFloatOrNull()?.coerceIn(0.5f, 2.0f) ?: 1.0f)
+                .putFloat("pitch", pitch.text.toString().toFloatOrNull()?.coerceIn(0.5f, 2.0f) ?: 1.0f)
                 .putInt("cutoff", cutoff.text.toString().toIntOrNull() ?: 30).apply()
         }
         fun btn(label: String, f: () -> Unit): Button {
@@ -456,6 +496,11 @@ class MainActivity : Activity() {
         }
         box.addView(groq)
         box.addView(cutoff)
+        box.addView(model)
+        box.addView(stt)
+        box.addView(rate)
+        box.addView(pitch)
+        box.addView(btn("Choose voice") { pickVoice() })
         box.addView(btn("Start background listening") { startListening() })
         box.addView(btn("Stop background listening") { stopService(Intent(this, JarvisService::class.java)) })
         box.addView(btn("Accessibility settings") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })

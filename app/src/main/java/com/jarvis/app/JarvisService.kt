@@ -168,7 +168,7 @@ class JarvisService : Service() {
         }
     }
 
-    private fun speak(s: String) { Voice.speak(this, s) }
+    private fun speak(s: String) { Speaker.speak(this, s) }
 
     private fun say(who: String, text: String) {
         sendBroadcast(Intent("com.jarvis.app.MSG").setPackage(packageName)

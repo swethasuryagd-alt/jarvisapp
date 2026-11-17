@@ -15,6 +15,9 @@ object Brain {
 
     fun clearHistory() { history.clear() }
 
+    private fun pref(c: Context, k: String, d: String): String =
+        prefs(c).getString(k, null)?.trim().takeUnless { it.isNullOrEmpty() } ?: d
+
     fun handle(c: Context, raw: String): String =
         try { run(c, raw) } catch (e: Exception) { "Error: ${e.message}" }
 
@@ -76,8 +79,10 @@ object Brain {
                 "You are Jarvis, a fast assistant on the user's phone. Reply in one or two short sentences, in the user's language.")
         )
         for (m in history) msgs.put(m)
-        val body = JSONObject().put("model", "llama-3.3-70b-versatile")
-            .put("messages", msgs).put("max_tokens", 200)
+        val model = pref(c, "model", "openai/gpt-oss-120b")
+        val body = JSONObject().put("model", model)
+            .put("messages", msgs).put("max_completion_tokens", 700)
+        if (model.contains("gpt-oss")) body.put("reasoning_effort", "low")
         val res = post("https://api.groq.com/openai/v1/chat/completions", key, "application/json", body.toString().toByteArray())
         val reply = JSONObject(res).getJSONArray("choices").getJSONObject(0)
             .getJSONObject("message").getString("content").trim()
@@ -90,7 +95,7 @@ object Brain {
         if (key.isBlank()) throw Exception("Add your Groq key first.")
         val b = "----jarvis" + System.currentTimeMillis()
         val out = ByteArrayOutputStream()
-        out.write("--$b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nwhisper-large-v3-turbo\r\n".toByteArray())
+        out.write("--$b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n${pref(c, "stt", "whisper-large-v3")}\r\n".toByteArray())
         out.write("--$b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\n".toByteArray())
         out.write(wav)
         out.write("\r\n--$b--\r\n".toByteArray())
