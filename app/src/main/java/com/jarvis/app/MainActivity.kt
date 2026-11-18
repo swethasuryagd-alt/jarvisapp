@@ -32,16 +32,16 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 import java.util.Calendar
 
-private val BG = Color.parseColor("#0E0E12")
-private val PANEL = Color.parseColor("#1C1C24")
-private val MINE = Color.parseColor("#26263A")
-private val ACCENT = Color.parseColor("#8E8DD8")
+private val BG = Color.parseColor("#05090D")
+private val PANEL = Color.parseColor("#0F1A22")
+private val MINE = Color.parseColor("#0F2F3A")
+private val ACCENT = Color.parseColor("#22D3EE")
 private val DIM = Color.parseColor("#8A8A99")
-private val LINE = Color.parseColor("#33333F")
+private val LINE = Color.parseColor("#1F4A57")
 
 class MainActivity : Activity() {
 
-    private lateinit var sphere: SphereView
+    private lateinit var sphere: ReactorView
     private lateinit var barsL: BarsView
     private lateinit var barsR: BarsView
     private lateinit var statusRow: LinearLayout
@@ -148,7 +148,7 @@ class MainActivity : Activity() {
         topSpace = View(this)
         main.addView(topSpace, LinearLayout.LayoutParams(-1, 0, 1f))
 
-        sphere = SphereView(this)
+        sphere = ReactorView(this)
         sphere.setOnClickListener { micCapture() }
         val sphereLp = LinearLayout.LayoutParams(dp(240), dp(240))
         sphereLp.gravity = Gravity.CENTER_HORIZONTAL
@@ -189,7 +189,7 @@ class MainActivity : Activity() {
         val typeLabel = TextView(this)
         typeLabel.text = "Type"
         typeLabel.textSize = 16f
-        typeLabel.setTextColor(Color.parseColor("#C9C9D6"))
+        typeLabel.setTextColor(Color.parseColor("#A8EAF7"))
         typeBtn.addView(typeLabel, LinearLayout.LayoutParams(-2, -2).apply { leftMargin = dp(8) })
         typeBtn.setOnClickListener { toggleInput() }
         main.addView(typeBtn, LinearLayout.LayoutParams(-1, dp(52)))
@@ -232,7 +232,7 @@ class MainActivity : Activity() {
         // ----- bottom tabs (home mode) -----
         tabs = LinearLayout(this)
         tabs.orientation = LinearLayout.HORIZONTAL
-        tabs.setBackgroundColor(Color.parseColor("#14141A"))
+        tabs.setBackgroundColor(Color.parseColor("#0A1218"))
         val names = listOf("Jarvis", "Today", "Memory", "Files")
         for ((i, name) in names.withIndex()) {
             val tv = TextView(this)
@@ -378,8 +378,8 @@ class MainActivity : Activity() {
             requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 2)
             return
         }
-        if (Brain.prefs(this).getString("groq", "").isNullOrBlank()) {
-            addMessage("Jarvis", "Add your Groq key in settings (gear icon) first.")
+        if (Brain.prefs(this).getString("gemini", "").isNullOrBlank()) {
+            addMessage("Jarvis", "Add your Gemini key in settings (gear icon) first.")
             return
         }
         Speaker.stop()
@@ -394,12 +394,11 @@ class MainActivity : Activity() {
                     return@Thread
                 }
                 setStatus("Thinking…", 0.4f, false)
-                val t = Brain.transcribe(this, wav)
-                if (t.isBlank()) { setStatus(null); return@Thread }
-                addMessage("Boss", t)
-                val reply = Brain.handle(this, t)
-                addMessage("Jarvis", reply)
-                finishReply(reply, true)
+                val (heard, answer) = Brain.handleAudio(this, wav)
+                if (heard.isBlank()) { setStatus(null); return@Thread }
+                addMessage("Boss", heard)
+                addMessage("Jarvis", answer)
+                finishReply(answer, true)
             } catch (e: Exception) {
                 addMessage("Jarvis", "Error: ${e.message}")
                 setStatus(null)
@@ -415,8 +414,8 @@ class MainActivity : Activity() {
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             need.add(Manifest.permission.POST_NOTIFICATIONS)
         if (need.isNotEmpty()) { requestPermissions(need.toTypedArray(), 1); return }
-        if (Brain.prefs(this).getString("groq", "").isNullOrBlank()) {
-            addMessage("Jarvis", "Add your Groq key in settings first.")
+        if (Brain.prefs(this).getString("gemini", "").isNullOrBlank()) {
+            addMessage("Jarvis", "Add your Gemini key in settings first.")
             return
         }
         ContextCompat.startForegroundService(this, Intent(this, JarvisService::class.java))
@@ -456,8 +455,8 @@ class MainActivity : Activity() {
         box.orientation = LinearLayout.VERTICAL
         box.setPadding(dp(20), dp(12), dp(20), dp(4))
         val groq = EditText(this)
-        groq.hint = "Groq API key"
-        groq.setText(p.getString("groq", ""))
+        groq.hint = "Gemini API key"
+        groq.setText(p.getString("gemini", ""))
         groq.setSingleLine()
         groq.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         val cutoff = EditText(this)
@@ -472,17 +471,14 @@ class MainActivity : Activity() {
             return e
         }
         val model = field("AI model", p.getString("model", "") ?: "")
-        model.hint = "AI model (blank = openai/gpt-oss-120b)"
-        val stt = field("Speech model", p.getString("stt", "") ?: "")
-        stt.hint = "Speech model (blank = whisper-large-v3)"
+        model.hint = "AI model (blank = automatic)"
         val rate = field("Voice speed", p.getFloat("rate", 1.0f).toString())
         rate.hint = "Voice speed (1.0 = normal)"
         val pitch = field("Voice pitch", p.getFloat("pitch", 1.0f).toString())
         pitch.hint = "Voice pitch (1.0 = normal, lower = deeper)"
         fun save() {
-            p.edit().putString("groq", groq.text.toString().trim())
+            p.edit().putString("gemini", groq.text.toString().trim())
                 .putString("model", model.text.toString().trim())
-                .putString("stt", stt.text.toString().trim())
                 .putFloat("rate", rate.text.toString().toFloatOrNull()?.coerceIn(0.5f, 2.0f) ?: 1.0f)
                 .putFloat("pitch", pitch.text.toString().toFloatOrNull()?.coerceIn(0.5f, 2.0f) ?: 1.0f)
                 .putInt("cutoff", cutoff.text.toString().toIntOrNull() ?: 30).apply()
@@ -497,7 +493,6 @@ class MainActivity : Activity() {
         box.addView(groq)
         box.addView(cutoff)
         box.addView(model)
-        box.addView(stt)
         box.addView(rate)
         box.addView(pitch)
         box.addView(btn("Choose voice") { pickVoice() })

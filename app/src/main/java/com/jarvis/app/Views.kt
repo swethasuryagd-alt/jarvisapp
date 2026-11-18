@@ -4,35 +4,52 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RadialGradient
 import android.graphics.RectF
+import android.graphics.Shader
 import android.os.SystemClock
 import android.view.View
 import kotlin.math.cos
 import kotlin.math.sin
-import kotlin.math.sqrt
 
-/** Rotating particle sphere (the orb). energy 0..1 makes it spin faster and pulse. */
-class SphereView(ctx: Context) : View(ctx) {
-    private val n = 520
-    private val xs = FloatArray(n)
-    private val ys = FloatArray(n)
-    private val zs = FloatArray(n)
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+/** Arc-reactor / HUD style orb. energy 0..1 = faster rotation, brighter pulse and ripples. */
+class ReactorView(ctx: Context) : View(ctx) {
     private val d = resources.displayMetrics.density
-    private var angle = 0f
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val oval = RectF()
+    private val tri = Path()
+    private val cyan = Color.parseColor("#22D3EE")
+    private val ice = Color.parseColor("#C8F7FF")
+    private var a1 = 0f
+    private var a2 = 0f
+    private var a3 = 0f
+    private var a4 = 0f
     private var last = 0L
     private var smooth = 0f
     @Volatile var energy = 0f
 
-    init {
-        for (i in 0 until n) {
-            val y = 1f - 2f * (i + 0.5f) / n
-            val r = sqrt(1f - y * y)
-            val th = i * 2.3999631f
-            xs[i] = cos(th) * r
-            ys[i] = y
-            zs[i] = sin(th) * r
-        }
+    override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
+        val r = minOf(w, h) / 2f * 0.94f * 0.3f
+        fill.shader = RadialGradient(
+            w / 2f, h / 2f, maxOf(r, 1f),
+            intArrayOf(Color.argb(255, 235, 253, 255), Color.argb(200, 34, 211, 238), Color.argb(0, 34, 211, 238)),
+            floatArrayOf(0f, 0.45f, 1f), Shader.TileMode.CLAMP
+        )
+    }
+
+    private fun ring(c: Canvas, cx: Float, cy: Float, r: Float, start: Float, sweep: Float,
+                     w: Float, a: Int, col: Int, g: Float = 3f) {
+        oval.set(cx - r, cy - r, cx + r, cy + r)
+        paint.style = Paint.Style.STROKE
+        paint.color = col
+        paint.strokeWidth = w * g
+        paint.alpha = a / 5
+        c.drawArc(oval, start, sweep, false, paint)
+        paint.strokeWidth = w
+        paint.alpha = a
+        c.drawArc(oval, start, sweep, false, paint)
     }
 
     override fun onDraw(c: Canvas) {
@@ -40,19 +57,77 @@ class SphereView(ctx: Context) : View(ctx) {
         val dt = if (last == 0L) 16L else minOf(now - last, 50L)
         last = now
         smooth += (energy - smooth) * 0.08f
-        angle += dt * (0.00035f + 0.0014f * smooth)
+        val sp = 1f + 2.2f * smooth
+        a1 += dt * 0.012f * sp
+        a2 -= dt * 0.02f * sp
+        a3 += dt * 0.035f * sp
+        a4 -= dt * 0.006f * sp
+
         val cx = width / 2f
         val cy = height / 2f
-        val rad = minOf(width, height) / 2f * 0.86f * (1f + 0.05f * smooth * sin(now / 110f))
-        val ca = cos(angle)
-        val sa = sin(angle)
-        val dotScale = (minOf(width, height) / (240f * d)).coerceAtLeast(0.5f)
-        for (i in 0 until n) {
-            val x = xs[i] * ca + zs[i] * sa
-            val z = -xs[i] * sa + zs[i] * ca
-            val depth = (z + 1f) / 2f
-            paint.color = Color.argb((50 + 190 * depth).toInt(), 185, 185, 225)
-            c.drawCircle(cx + x * rad, cy + ys[i] * rad, (0.6f + 2.0f * depth) * d * dotScale, paint)
+        val rr = minOf(width, height) / 2f * 0.94f
+        val pulse = 1f + 0.07f * smooth * sin(now / 140f)
+
+        // outer ring
+        ring(c, cx, cy, rr * 0.98f, 0f, 360f, 1.2f * d, 150, cyan)
+
+        // tick marks
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1.2f * d
+        paint.color = cyan
+        for (i in 0 until 72) {
+            val ang = Math.toRadians((i * 5 + a1).toDouble())
+            val isLong = i % 6 == 0
+            val r1 = rr * 0.90f
+            val r2 = rr * (if (isLong) 0.80f else 0.85f)
+            paint.alpha = if (isLong) 230 else 120
+            c.drawLine(
+                cx + (cos(ang) * r1).toFloat(), cy + (sin(ang) * r1).toFloat(),
+                cx + (cos(ang) * r2).toFloat(), cy + (sin(ang) * r2).toFloat(), paint
+            )
+        }
+
+        // three sweeping arcs
+        for (k in 0 until 3) ring(c, cx, cy, rr * 0.72f, a2 + k * 120f, 80f, 3f * d, 230, cyan)
+        // thin inner ring
+        ring(c, cx, cy, rr * 0.62f, 0f, 360f, 1f * d, 110, cyan)
+        // reactor coil segments
+        for (k in 0 until 10) ring(c, cx, cy, rr * 0.50f, a4 + k * 36f, 26f, rr * 0.09f, 190, cyan, 1.5f)
+        // bright counter-rotating arcs
+        ring(c, cx, cy, rr * 0.38f, a3, 100f, 2f * d, 255, ice)
+        ring(c, cx, cy, rr * 0.38f, a3 + 180f, 40f, 2f * d, 255, ice)
+        // inner ring
+        ring(c, cx, cy, rr * 0.28f * pulse, 0f, 360f, 2f * d, 200, ice)
+
+        // rotating triangle
+        tri.reset()
+        for (k in 0 until 3) {
+            val ang = Math.toRadians((a4 * 3f + k * 120f - 90f).toDouble())
+            val px = cx + (cos(ang) * rr * 0.2f).toFloat()
+            val py = cy + (sin(ang) * rr * 0.2f).toFloat()
+            if (k == 0) tri.moveTo(px, py) else tri.lineTo(px, py)
+        }
+        tri.close()
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1.5f * d
+        paint.color = ice
+        paint.alpha = 220
+        c.drawPath(tri, paint)
+
+        // glowing core
+        c.save()
+        c.scale(pulse, pulse, cx, cy)
+        c.drawCircle(cx, cy, rr * 0.3f, fill)
+        c.restore()
+
+        // ripple while listening / speaking
+        if (smooth > 0.05f) {
+            val t = (now % 1600L) / 1600f
+            paint.style = Paint.Style.STROKE
+            paint.strokeWidth = 1.5f * d
+            paint.color = cyan
+            paint.alpha = ((1f - t) * 140f * smooth).toInt().coerceIn(0, 255)
+            c.drawCircle(cx, cy, rr * (0.35f + 0.65f * t), paint)
         }
         postInvalidateOnAnimation()
     }
@@ -65,7 +140,7 @@ class BarsView(ctx: Context) : View(ctx) {
     @Volatile var active = false
 
     init {
-        paint.color = Color.parseColor("#8E8DD8")
+        paint.color = Color.parseColor("#22D3EE")
         paint.strokeCap = Paint.Cap.ROUND
     }
 
@@ -84,7 +159,7 @@ class BarsView(ctx: Context) : View(ctx) {
 }
 
 /** Simple line icons drawn in code (no image files needed). */
-class IconView(ctx: Context, private val kind: Int, tint: Int = Color.parseColor("#C9C9D6")) : View(ctx) {
+class IconView(ctx: Context, private val kind: Int, tint: Int = Color.parseColor("#A8EAF7")) : View(ctx) {
     companion object {
         const val CLOCK = 0
         const val GEAR = 1
