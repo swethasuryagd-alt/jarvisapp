@@ -12,10 +12,10 @@ class HttpError(val code: Int, val msg: String) : Exception("HTTP $code $msg")
 
 object Brain {
     private val history = ArrayList<JSONObject>()
-    private val FALLBACK = listOf("gemini-3.5-flash", "gemini-2.5-flash", "gemini-3.1-flash-lite")
+    private val FALLBACK = listOf("gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-3.5-flash")
     private const val SYSTEM = "You are Jarvis, a fast personal assistant on the user's phone, in the style of the AI from the Iron Man films. " +
             "The user's name is Boss. Always answer in the language the user used (for example Tamil in Tamil). " +
-            "Keep every answer to one to three short spoken sentences. No markdown, no lists, no emojis."
+            "Keep every answer to one to three short spoken sentences. No markdown, no lists, no emojis. The user may start by saying your name, Jarvis; that is just calling you."
 
     fun prefs(c: Context) = c.getSharedPreferences("jarvis", Context.MODE_PRIVATE)
 
@@ -49,7 +49,7 @@ object Brain {
         val ask = JSONObject().put("text",
             "Listen to the audio. Reply ONLY with JSON in this exact form: " +
                     "{\"heard\": \"the exact words spoken\", \"reply\": \"your answer\"}. " +
-                    "If nothing intelligible was said, use empty strings.")
+                    "The speaker may begin with the word Jarvis; keep it in heard. If nothing intelligible was said, use empty strings.")
         val contents = JSONArray()
         for (m in history) contents.put(m)
         contents.put(JSONObject().put("role", "user").put("parts", JSONArray().put(ask).put(audio)))
@@ -74,29 +74,31 @@ object Brain {
     private fun generate(c: Context, contents: JSONArray, cfg: JSONObject): String {
         val key = prefs(c).getString("gemini", "")?.trim() ?: ""
         if (key.isEmpty()) throw Exception("Add your Gemini key in settings first.")
-        val body = JSONObject()
-            .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", SYSTEM))))
-            .put("contents", contents)
-            .put("generationConfig", cfg)
-            .toString().toByteArray()
 
         val custom = prefs(c).getString("model", "")?.trim() ?: ""
-        val worked = prefs(c).getString("model_ok", "") ?: ""
         val tries = ArrayList<String>()
         if (custom.isNotEmpty()) tries.add(custom)
-        if (worked.isNotEmpty() && worked !in tries) tries.add(worked)
         for (m in FALLBACK) if (m !in tries) tries.add(m)
 
         var last: Exception? = null
         for (m in tries) {
             try {
+                val conf = JSONObject(cfg.toString())
+                if (m.startsWith("gemini-2.5-flash")) conf.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+                val body = JSONObject()
+                    .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", SYSTEM))))
+                    .put("contents", contents)
+                    .put("generationConfig", conf)
+                    .toString().toByteArray()
                 val res = post("https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent", key, body)
-                prefs(c).edit().putString("model_ok", m).apply()
                 return extract(res)
             } catch (e: HttpError) {
                 last = e
-                val missing = e.code == 404 || (e.code == 400 && e.msg.contains("not found", ignoreCase = true))
-                if (!missing) throw e
+                val tryNext = e.code == 404 || e.code == 429 || e.code >= 500 ||
+                        (e.code == 400 && e.msg.contains("not found", ignoreCase = true))
+                if (!tryNext) throw e
+            } catch (e: java.io.IOException) {
+                last = e
             }
         }
         throw last ?: Exception("No Gemini model worked")
@@ -120,7 +122,7 @@ object Brain {
         con.requestMethod = "POST"
         con.doOutput = true
         con.connectTimeout = 10000
-        con.readTimeout = 40000
+        con.readTimeout = 20000
         con.setRequestProperty("x-goog-api-key", key)
         con.setRequestProperty("Content-Type", "application/json")
         con.outputStream.use { it.write(body) }

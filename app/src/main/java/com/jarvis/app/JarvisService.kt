@@ -13,17 +13,18 @@ import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.graphics.drawable.Icon
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
-import android.media.ToneGenerator
 import android.os.BatteryManager
 import android.os.IBinder
+import android.os.VibrationEffect
+import android.os.Vibrator
 import android.os.SystemClock
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import org.vosk.Model
 import org.vosk.Recognizer
+import java.io.ByteArrayOutputStream
 import java.io.File
 
 class JarvisService : Service() {
@@ -98,9 +99,9 @@ class JarvisService : Service() {
         say("Status", "Listening. Say Jarvis.")
         var fails = 0
         while (running) {
-            var heard = false
+            var wav: ByteArray? = null
             try {
-                heard = listenForWake()
+                wav = listenAndCapture()
                 fails = 0
             } catch (e: Throwable) {
                 fails++
@@ -113,7 +114,7 @@ class JarvisService : Service() {
                 try { Thread.sleep(2000) } catch (_: Exception) {}
             }
             if (!running) break
-            if (heard) handleCommand()
+            if (wav != null) handleCommand(wav)
         }
         try { model?.close() } catch (_: Exception) {}
     }
@@ -136,13 +137,22 @@ class JarvisService : Service() {
         return wake.containsMatchIn(json)
     }
 
+    private fun buzz() {
+        try {
+            val v = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            v.vibrate(VibrationEffect.createOneShot(60, VibrationEffect.DEFAULT_AMPLITUDE))
+        } catch (_: Exception) {}
+    }
+
     /**
+     * Listens for "Jarvis" and then keeps recording the SAME stream until you stop talking,
+     * so nothing you say right after (or in the same breath as) the wake word is lost.
      * Battery saver: the mic is read all the time (cheap), but the speech recognizer only runs
-     * while somebody is actually making sound, so a quiet room costs almost no CPU.
+     * while somebody is actually making sound.
      */
     @SuppressLint("MissingPermission")
-    private fun listenForWake(): Boolean {
-        val m = model ?: return false
+    private fun listenAndCapture(): ByteArray? {
+        val m = model ?: return null
         val minBuf = AudioRecord.getMinBufferSize(16000, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         val ar = AudioRecord(MediaRecorder.AudioSource.MIC, 16000, AudioFormat.CHANNEL_IN_MONO,
             AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, 16384))
@@ -154,9 +164,15 @@ class JarvisService : Service() {
         val wake = Regex("jarvis|jervis|jarvas|jarvice|harvis")
         val buf = ByteArray(3200) // 100 ms
         val pre = ArrayDeque<ByteArray>()
+        val utter = ByteArrayOutputStream()
         var floor = 300.0
         var feeding = false
+        var captured = false
         var lastVoice = 0L
+        var utterStart = 0L
+        var prompted = false
+        var promptAt = 0L
+        var spokeAfter = false
         ar.startRecording()
         try {
             while (running) {
@@ -167,8 +183,8 @@ class JarvisService : Service() {
                 var sum = 0.0
                 var i = 0
                 while (i + 1 < n) {
-                    val s = (buf[i].toInt() and 0xFF) or (buf[i + 1].toInt() shl 8)
-                    sum += s.toDouble() * s
+                    val sv = (buf[i].toInt() and 0xFF) or (buf[i + 1].toInt() shl 8)
+                    sum += sv.toDouble() * sv
                     i += 2
                 }
                 val rms = Math.sqrt(sum / (n / 2))
@@ -177,22 +193,54 @@ class JarvisService : Service() {
                 val voice = rms > maxOf(floor * 2.2, 400.0)
                 if (voice) lastVoice = now
 
-                if (!feeding) {
-                    if (voice) {
-                        feeding = true
-                        for (p in pre) { if (check(rec, p, p.size, wake)) return true }
-                        pre.clear()
-                        if (check(rec, buf, n, wake)) return true
+                if (!captured) {
+                    if (!feeding) {
+                        if (voice) {
+                            feeding = true
+                            utterStart = now
+                            utter.reset()
+                            for (p in pre) {
+                                utter.write(p, 0, p.size)
+                                if (!captured && check(rec, p, p.size, wake)) captured = true
+                            }
+                            pre.clear()
+                            utter.write(buf, 0, n)
+                            if (!captured && check(rec, buf, n, wake)) captured = true
+                        } else {
+                            pre.addLast(buf.copyOf(n))
+                            if (pre.size > 5) pre.removeFirst()
+                        }
                     } else {
-                        pre.addLast(buf.copyOf(n))
-                        if (pre.size > 3) pre.removeFirst()
+                        utter.write(buf, 0, n)
+                        if (check(rec, buf, n, wake)) {
+                            captured = true
+                        } else if (now - lastVoice > 1200) {
+                            feeding = false
+                            rec.reset()
+                            utter.reset()
+                        }
+                    }
+                    if (captured) {
+                        buzz()
+                        lastVoice = now
                     }
                 } else {
-                    if (check(rec, buf, n, wake)) return true
-                    if (now - lastVoice > 1200) {
-                        feeding = false
-                        rec.reset()
+                    utter.write(buf, 0, n)
+                    val total = now - utterStart
+                    val silent = now - lastVoice
+                    if (prompted) {
+                        if (voice && now - promptAt > 400) spokeAfter = true
+                        if (spokeAfter && silent > 1500) return Recorder.toWav(utter.toByteArray())
+                        if (!spokeAfter && now - promptAt > 4500) return Recorder.toWav(utter.toByteArray())
+                    } else if (silent > 1500) {
+                        if (total < 2500) {
+                            prompted = true
+                            promptAt = now
+                        } else {
+                            return Recorder.toWav(utter.toByteArray())
+                        }
                     }
+                    if (total > 20000 || utter.size() > 640000) return Recorder.toWav(utter.toByteArray())
                 }
             }
         } finally {
@@ -200,18 +248,14 @@ class JarvisService : Service() {
             ar.release()
             rec.close()
         }
-        return false
+        return null
     }
 
-    private fun handleCommand() {
+    private fun handleCommand(wav: ByteArray) {
         try {
-            try { ToneGenerator(AudioManager.STREAM_NOTIFICATION, 60).startTone(ToneGenerator.TONE_PROP_BEEP, 80) } catch (_: Exception) {}
-            val wav = Recorder.record()
-            if (wav != null) {
-                val (heard, answer) = Brain.handleAudio(this, wav)
-                if (heard.isNotBlank()) say("You", heard)
-                if (answer.isNotBlank()) { say("Jarvis", answer); Speaker.speak(this, answer) }
-            }
+            val (heard, answer) = Brain.handleAudio(this, wav)
+            if (heard.isNotBlank()) say("You", heard)
+            if (answer.isNotBlank()) { say("Jarvis", answer); Speaker.speak(this, answer) }
         } catch (e: Exception) {
             say("Jarvis", "Error: ${e.message}")
         }
