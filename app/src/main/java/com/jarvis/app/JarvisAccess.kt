@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.graphics.Path
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 
 class JarvisAccess : AccessibilityService() {
 
@@ -21,7 +22,7 @@ class JarvisAccess : AccessibilityService() {
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
     override fun onInterrupt() {}
 
-    private fun swipeUp() {
+    fun swipeUp() {
         val dm = resources.displayMetrics
         val x = dm.widthPixels / 2f
         val p = Path()
@@ -30,6 +31,29 @@ class JarvisAccess : AccessibilityService() {
         val g = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(p, 0, 250)).build()
         dispatchGesture(g, null, null)
+    }
+
+    private fun findNode(node: AccessibilityNodeInfo?, labels: List<String>): AccessibilityNodeInfo? {
+        if (node == null) return null
+        val t = node.text?.toString()?.lowercase() ?: ""
+        val d = node.contentDescription?.toString()?.lowercase() ?: ""
+        if (labels.any { t.contains(it) || d.contains(it) }) return node
+        for (i in 0 until node.childCount) {
+            val r = findNode(node.getChild(i), labels)
+            if (r != null) return r
+        }
+        return null
+    }
+
+    /** Finds a button on screen by its label (for example "speaker") and taps it if it is not already in the wanted state. */
+    fun toggleByLabel(labels: List<String>, wantOn: Boolean): Boolean {
+        val root = rootInActiveWindow ?: return false
+        val n = findNode(root, labels) ?: return false
+        val isOn = n.isChecked || n.isSelected
+        if (isOn == wantOn) return true
+        var p: AccessibilityNodeInfo? = n
+        while (p != null && !p.isClickable) p = p.parent
+        return (p ?: n).performAction(AccessibilityNodeInfo.ACTION_CLICK)
     }
 
     /** Swipes up every gapSec seconds. If pkg is set, stops when that app leaves the screen. */

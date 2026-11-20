@@ -42,7 +42,7 @@ object Recorder {
                 for (i in 0 until r) bb.putShort(buf[i])
                 pcm.write(bb.array())
                 if (!speaking && el > 6000) break
-                if (speaking && now - lastVoice > 1500) break
+                if (speaking && now - lastVoice > 1100) break
                 if (el > 15000) break
             }
         } finally {

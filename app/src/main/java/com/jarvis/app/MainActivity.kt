@@ -23,6 +23,7 @@ import android.view.View
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -336,8 +337,8 @@ class MainActivity : Activity() {
 
     private fun finishReply(reply: String, speak: Boolean) {
         if (reply.isBlank()) { setStatus(null); return }
-        if (speak) {
-            Speaker.speak(this, reply)
+        if (speak && Brain.prefs(this).getBoolean("speak", true)) {
+            Speaker.speak(this, reply) { msg -> addMessage("Jarvis", msg) }
             setStatus("Jarvis is speaking", 0.9f, false)
             ui.postDelayed({ setStatus(null) }, minOf(9000L, 1500L + reply.length * 55L))
         } else {
@@ -363,9 +364,13 @@ class MainActivity : Activity() {
         addMessage("Boss", t)
         setStatus("Thinking…", 0.4f, false)
         Thread {
-            val reply = Brain.handle(this, t)
+            val speakOn = Brain.prefs(this).getBoolean("speak", true)
+            val reply = Brain.handle(this, t) { interim ->
+                addMessage("Jarvis", interim)
+                if (speakOn) Speaker.speak(this, interim) { m -> addMessage("Jarvis", m) }
+            }
             addMessage("Jarvis", reply)
-            finishReply(reply, false)
+            finishReply(reply, true)
         }.start()
     }
 
@@ -394,7 +399,11 @@ class MainActivity : Activity() {
                     return@Thread
                 }
                 setStatus("Thinking…", 0.4f, false)
-                val (heard, answer) = Brain.handleAudio(this, wav)
+                val speakOn = Brain.prefs(this).getBoolean("speak", true)
+                val (heard, answer) = Brain.handleAudio(this, wav, LocalStt.transcribe(wav)) { interim ->
+                    addMessage("Jarvis", interim)
+                    if (speakOn) Speaker.speak(this, interim) { m -> addMessage("Jarvis", m) }
+                }
                 if (heard.isBlank()) { setStatus(null); return@Thread }
                 addMessage("Boss", heard)
                 addMessage("Jarvis", answer)
@@ -476,11 +485,15 @@ class MainActivity : Activity() {
         rate.hint = "Voice speed (1.0 = normal)"
         val pitch = field("Voice pitch", p.getFloat("pitch", 1.0f).toString())
         pitch.hint = "Voice pitch (1.0 = normal, lower = deeper)"
+        val speakBox = CheckBox(this)
+        speakBox.text = "Speak replies aloud"
+        speakBox.isChecked = p.getBoolean("speak", true)
         fun save() {
             p.edit().putString("gemini", groq.text.toString().trim())
                 .putString("model", model.text.toString().trim())
                 .putFloat("rate", rate.text.toString().toFloatOrNull()?.coerceIn(0.5f, 2.0f) ?: 1.0f)
                 .putFloat("pitch", pitch.text.toString().toFloatOrNull()?.coerceIn(0.5f, 2.0f) ?: 1.0f)
+                .putBoolean("speak", speakBox.isChecked)
                 .putInt("cutoff", cutoff.text.toString().toIntOrNull() ?: 30).apply()
         }
         fun btn(label: String, f: () -> Unit): Button {
@@ -495,7 +508,19 @@ class MainActivity : Activity() {
         box.addView(model)
         box.addView(rate)
         box.addView(pitch)
+        box.addView(speakBox)
         box.addView(btn("Choose voice") { pickVoice() })
+        box.addView(btn("Test voice") {
+            Speaker.speak(this, "Hello Boss, I am Jarvis.") { msg ->
+                runOnUiThread { Toast.makeText(this, msg, Toast.LENGTH_LONG).show() }
+            }
+        })
+        box.addView(btn("Allow calling and contacts") {
+            requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.CALL_PHONE, Manifest.permission.ANSWER_PHONE_CALLS), 3)
+        })
+        box.addView(btn("Allow brightness control") {
+            startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:$packageName")))
+        })
         box.addView(btn("Start background listening") { startListening() })
         box.addView(btn("Stop background listening") { stopService(Intent(this, JarvisService::class.java)) })
         box.addView(btn("Accessibility settings") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })

@@ -90,6 +90,7 @@ class JarvisService : Service() {
                 File(dir, ".done").writeText("1")
             }
             model = Model(dir.absolutePath)
+            LocalStt.model = model
         } catch (e: Throwable) {
             say("Status", "Model failed: ${e.message}")
             notifyMsg("Wake word model failed: ${e.message}")
@@ -116,6 +117,7 @@ class JarvisService : Service() {
             if (!running) break
             if (wav != null) handleCommand(wav)
         }
+        LocalStt.model = null
         try { model?.close() } catch (_: Exception) {}
     }
 
@@ -230,9 +232,9 @@ class JarvisService : Service() {
                     val silent = now - lastVoice
                     if (prompted) {
                         if (voice && now - promptAt > 400) spokeAfter = true
-                        if (spokeAfter && silent > 1500) return Recorder.toWav(utter.toByteArray())
+                        if (spokeAfter && silent > 1100) return Recorder.toWav(utter.toByteArray())
                         if (!spokeAfter && now - promptAt > 4500) return Recorder.toWav(utter.toByteArray())
-                    } else if (silent > 1500) {
+                    } else if (silent > 1100) {
                         if (total < 2500) {
                             prompted = true
                             promptAt = now
@@ -253,9 +255,17 @@ class JarvisService : Service() {
 
     private fun handleCommand(wav: ByteArray) {
         try {
-            val (heard, answer) = Brain.handleAudio(this, wav)
+            val localText = LocalStt.transcribe(wav)
+            val speakOn = Brain.prefs(this).getBoolean("speak", true)
+            val (heard, answer) = Brain.handleAudio(this, wav, localText) { interim ->
+                say("Jarvis", interim)
+                if (speakOn) Speaker.speak(this, interim) { m -> say("Jarvis", m) }
+            }
             if (heard.isNotBlank()) say("You", heard)
-            if (answer.isNotBlank()) { say("Jarvis", answer); Speaker.speak(this, answer) }
+            if (answer.isNotBlank()) {
+                say("Jarvis", answer)
+                if (Brain.prefs(this).getBoolean("speak", true)) Speaker.speak(this, answer) { m -> say("Jarvis", m) }
+            }
         } catch (e: Exception) {
             say("Jarvis", "Error: ${e.message}")
         }
