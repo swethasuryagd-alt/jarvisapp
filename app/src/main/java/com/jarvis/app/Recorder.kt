@@ -15,13 +15,21 @@ object Recorder {
     @SuppressLint("MissingPermission")
     fun record(): ByteArray? {
         val minBuf = AudioRecord.getMinBufferSize(SR, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val rec = AudioRecord(MediaRecorder.AudioSource.MIC, SR, AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, 8192))
-        if (rec.state != AudioRecord.STATE_INITIALIZED) { rec.release(); return null }
+        var opened: AudioRecord? = null
+        for (src in intArrayOf(MediaRecorder.AudioSource.VOICE_COMMUNICATION, MediaRecorder.AudioSource.MIC)) {
+            val r = AudioRecord(src, SR, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(minBuf, 8192))
+            if (r.state == AudioRecord.STATE_INITIALIZED) { opened = r; break }
+            r.release()
+        }
+        val rec = opened ?: return null
+        try {
+            if (android.media.audiofx.AutomaticGainControl.isAvailable())
+                android.media.audiofx.AutomaticGainControl.create(rec.audioSessionId)?.setEnabled(true)
+        } catch (_: Exception) {}
 
         val pcm = ByteArrayOutputStream()
         val buf = ShortArray(800) // 50 ms
-        var floor = 250.0
+        var floor = 80.0
         var speaking = false
         var lastVoice = 0L
         rec.startRecording()
@@ -36,13 +44,13 @@ object Recorder {
                 val now = System.currentTimeMillis()
                 val el = now - start
                 if (rms < floor * 1.6) floor += (rms - floor) * 0.05 else floor += (rms - floor) * 0.01
-                if (rms > maxOf(floor * 2.2, 400.0)) { speaking = true; lastVoice = now }
+                if (rms > maxOf(floor * 2.5, 110.0)) { speaking = true; lastVoice = now }
                 // keep ALL audio from the very first moment, so the start of the sentence is never lost
                 val bb = ByteBuffer.allocate(r * 2).order(ByteOrder.LITTLE_ENDIAN)
                 for (i in 0 until r) bb.putShort(buf[i])
                 pcm.write(bb.array())
                 if (!speaking && el > 6000) break
-                if (speaking && now - lastVoice > 1100) break
+                if (speaking && now - lastVoice > 750) break
                 if (el > 15000) break
             }
         } finally {
@@ -61,7 +69,7 @@ object Recorder {
             val v = Math.abs(src.getShort(i * 2).toInt())
             if (v > peak) peak = v
         }
-        val gain = if (peak < 12000) minOf(8.0, 20000.0 / peak) else 1.0
+        val gain = if (peak < 12000) minOf(16.0, 20000.0 / peak) else 1.0
         val out = ByteBuffer.allocate(n * 2).order(ByteOrder.LITTLE_ENDIAN)
         for (i in 0 until n) {
             val v = (src.getShort(i * 2) * gain).toInt().coerceIn(-32768, 32767)

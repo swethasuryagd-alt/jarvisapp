@@ -3,6 +3,7 @@ package com.jarvis.app
 import android.Manifest
 import android.accessibilityservice.AccessibilityService
 import android.app.KeyguardManager
+import android.app.SearchManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -15,6 +16,7 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.provider.AlarmClock
 import android.provider.ContactsContract
+import android.provider.MediaStore
 import android.provider.Settings
 import android.telecom.TelecomManager
 import android.util.Base64
@@ -34,7 +36,7 @@ object Brain {
     private class Ans(val heard: String, val reply: String, val action: String, val arg: String)
 
     private val history = ArrayList<JSONObject>()
-    private val FALLBACK = listOf("gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-3.5-flash")
+    private val FALLBACK = listOf("gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash")
     private val DAD = listOf("dad", "father", "papa", "appa", "daddy")
     private val MOM = listOf("mom", "mother", "mummy", "mommy", "mama", "amma")
     private const val PERM_CALL = "I need Phone permission. Open Jarvis settings and tap Allow calling and contacts."
@@ -47,12 +49,12 @@ object Brain {
             "You can control the phone ONLY through these actions: " +
             "call (arg: contact name or phone number, add 'on speaker' if wanted), answer_call (arg: 'speaker' if wanted), end_call, speaker (arg: on or off, for an ongoing call), " +
             "volume (arg: up, down, max, mute, or a number 0-100), brightness (arg: up, down, max, min, or a number 0-100), " +
-            "flashlight (arg: on or off), media (arg: play, pause, next or previous), timer (arg: number of seconds), alarm (arg: time as HH:MM in 24-hour form), " +
+            "flashlight (arg: on or off), media (arg: play, pause, next or previous), play_song (arg: song or artist name, or empty to just start music), timer (arg: number of seconds), alarm (arg: time as HH:MM in 24-hour form), " +
             "home, lock (turn the screen off), wake (turn the screen on), unlock, open_app (arg: app name), stop_listening, " +
             "search (arg: the question to look up on the web). " +
             "Use search for anything about current events, news, prices, scores, weather, recent facts, or anything you are not sure of, and set reply to a short line like 'Let me check that, Boss.'. " +
             "If the user wants something one of the other actions can do, set action and arg, and keep reply to a very short acknowledgement. " +
-            "If the user wants anything else that needs the phone (sending messages, closing apps, playing a specific song, changing other settings), " +
+            "If the user wants anything else that needs the phone (sending messages, closing apps, changing other settings), " +
             "leave action empty and honestly say you cannot do that yet. Never claim you did something yourself; the app confirms real actions. " +
             "For normal knowledge questions, just answer."
 
@@ -71,6 +73,20 @@ object Brain {
 
     fun clearHistory() { history.clear() }
 
+    /** Opens the internet connection to Gemini early (while you are still talking) so the answer comes back sooner. */
+    fun warmUp() {
+        Thread {
+            try {
+                val con = URL("https://generativelanguage.googleapis.com/").openConnection() as HttpURLConnection
+                con.connectTimeout = 3000
+                con.readTimeout = 3000
+                val code = con.responseCode
+                val s = if (code in 200..299) con.inputStream else con.errorStream
+                s?.use { it.readBytes() }
+            } catch (_: Exception) {}
+        }.start()
+    }
+
     private fun remember(role: String, text: String) {
         history.add(JSONObject().put("role", role).put("parts", JSONArray().put(JSONObject().put("text", text))))
         while (history.size > 12) history.removeAt(0)
@@ -82,7 +98,7 @@ object Brain {
         val done = AtomicBoolean(false)
         val t = Thread {
             try {
-                Thread.sleep(2500)
+                Thread.sleep(3000)
                 if (!done.get()) onInterim("One moment, Boss.")
             } catch (_: InterruptedException) {}
         }
@@ -150,7 +166,7 @@ object Brain {
         val contents = JSONArray()
         for (m in history) contents.put(m)
         contents.put(JSONObject().put("role", "user").put("parts", JSONArray().put(ask).put(audio)))
-        val cfg = JSONObject().put("responseMimeType", "application/json").put("maxOutputTokens", 1024)
+        val cfg = JSONObject().put("responseMimeType", "application/json").put("maxOutputTokens", 400)
         return parse(generate(c, contents, cfg))
     }
 
@@ -159,7 +175,7 @@ object Brain {
         for (m in history) contents.put(m)
         contents.put(JSONObject().put("role", "user")
             .put("parts", JSONArray().put(JSONObject().put("text", text + TEXT_HINT))))
-        val cfg = JSONObject().put("responseMimeType", "application/json").put("maxOutputTokens", 1024)
+        val cfg = JSONObject().put("responseMimeType", "application/json").put("maxOutputTokens", 400)
         val ans = withFiller(onInterim) { parse(generate(c, contents, cfg)) }
         val answer = finish(c, ans, text, onInterim)
         remember("user", text)
@@ -172,7 +188,7 @@ object Brain {
         for (m in history) contents.put(m)
         contents.put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text",
             q + "\n\n(Search the web if needed and answer in one to three short spoken sentences. Plain text only, no JSON.)"))))
-        val cfg = JSONObject().put("maxOutputTokens", 1024)
+        val cfg = JSONObject().put("maxOutputTokens", 400)
         return try {
             generate(c, contents, cfg, true).trim().ifBlank { "I could not find an answer, Boss." }
         } catch (e: Exception) {
@@ -317,25 +333,56 @@ object Brain {
         if (Regex("((turn on|switch on|wake)( up)?( the| my)? (screen|phone|display))|(screen on)|(^wake up$)").containsMatchIn(t))
             return doWake(c)
 
-        // music keys
-        if (Regex("^(play|resume)( the)?( music| song| songs)?$").matches(t)) return doMedia(c, "play")
+        // music
+        Regex("^play (.+)$").find(t)?.let { m ->
+            var what = m.groupValues[1].replace(Regex(" (on|in|using) (the )?spotify$"), "").trim()
+            what = what.removePrefix("the song ").removePrefix("song ").trim()
+            val generic = Regex("^(a song|some music|music|a song for me|songs|something|any song|some songs|my music|my songs|the music|music for me|song)$")
+            return if (what.isEmpty() || generic.matches(what)) doPlaySong(c, "") else doPlaySong(c, what)
+        }
+        if (Regex("^(play|resume)$").matches(t)) return doMedia(c, "play")
         if (Regex("^(pause|stop music|pause music|pause the music)$").matches(t)) return doMedia(c, "pause")
         if (Regex("^(next|skip)( the)?( song| track)?$").matches(t)) return doMedia(c, "next")
         if (Regex("^(previous|last|back)( song| track)$").matches(t)) return doMedia(c, "previous")
         return null
     }
 
+    private fun lev(a: String, b: String): Int {
+        val dp = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            var prev = dp[0]
+            dp[0] = i
+            for (j in 1..b.length) {
+                val tmp = dp[j]
+                dp[j] = minOf(dp[j] + 1, dp[j - 1] + 1, prev + (if (a[i - 1] == b[j - 1]) 0 else 1))
+                prev = tmp
+            }
+        }
+        return dp[b.length]
+    }
+
     private fun findApp(c: Context, name: String): String? {
+        val q = name.lowercase().replace(Regex("[^a-z0-9]"), "")
+        if (q.length < 3) return null
         val pm = c.packageManager
         val list = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER), 0)
         var best: String? = null
+        var bestScore = 0.0
         for (r in list) {
-            val label = r.loadLabel(pm).toString().lowercase().replace(Regex("[^a-z0-9 ]"), "")
-            if (label == name) return r.activityInfo.packageName
-            if (best == null && label.isNotEmpty() && (label.contains(name) || name.contains(label)))
+            val label = r.loadLabel(pm).toString().lowercase().replace(Regex("[^a-z0-9]"), "")
+            if (label.isEmpty()) continue
+            val score = when {
+                label == q -> 1.0
+                label.startsWith(q) || q.startsWith(label) -> 0.9
+                label.contains(q) -> 0.8
+                else -> 1.0 - lev(label, q).toDouble() / maxOf(label.length, q.length)
+            }
+            if (score > bestScore) {
+                bestScore = score
                 best = r.activityInfo.packageName
+            }
         }
-        return best
+        return if (bestScore >= 0.7) best else null
     }
 
     private fun launch(c: Context, pkg: String): Boolean = try {
@@ -357,6 +404,7 @@ object Brain {
                 "brightness" -> doBrightness(c, arg)
                 "flashlight" -> doTorch(c, arg)
                 "media" -> doMedia(c, arg)
+                "play_song" -> doPlaySong(c, arg)
                 "timer" -> doTimer(c, arg)
                 "alarm" -> doAlarm(c, arg)
                 "home" -> doGlobal(AccessibilityService.GLOBAL_ACTION_HOME, "Going to the home screen.")
@@ -387,34 +435,70 @@ object Brain {
         else "Locking the screen needs Android 9 or newer."
 
     @Suppress("DEPRECATION")
-    private fun doWake(c: Context): String {
-        val pm = c.getSystemService(Context.POWER_SERVICE) as PowerManager
-        val wl = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "jarvis:wake")
-        wl.acquire(5000)
+    private fun doWake(c: Context, dismiss: Boolean = false): String {
+        try {
+            val pm = c.getSystemService(Context.POWER_SERVICE) as PowerManager
+            val wl = pm.newWakeLock(PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP, "jarvis:wake")
+            wl.acquire(5000)
+        } catch (_: Exception) {}
+        try {
+            val i = Intent(c, WakeActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                .putExtra("dismiss", dismiss)
+            (JarvisAccess.inst ?: c).startActivity(i)
+        } catch (_: Exception) {}
         return "Screen on."
     }
 
     private fun doUnlock(c: Context): String {
-        doWake(c)
         val km = c.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
         if (!km.isKeyguardLocked) return "The phone is already unlocked."
-        if (km.isDeviceSecure)
+        if (km.isDeviceSecure) {
+            doWake(c, false)
             return "Screen on. Your phone has a PIN, pattern or fingerprint lock, so I can't unlock it for you."
-        val acc = JarvisAccess.inst ?: return "Screen on. Turn on Jarvis in Accessibility settings so I can swipe to unlock."
-        Thread {
-            try { Thread.sleep(900) } catch (_: Exception) {}
-            acc.swipeUp()
-        }.start()
+        }
+        doWake(c, true)
+        val acc = JarvisAccess.inst
+        if (acc != null) {
+            Thread {
+                try { Thread.sleep(1200) } catch (_: Exception) {}
+                acc.swipeUp()
+            }.start()
+        }
         return "Unlocking."
     }
 
+    private fun cleanName(x: String): String =
+        x.lowercase().replace(Regex("[^\\p{L}\\p{N} ]"), " ").replace(Regex("\\s+"), " ").trim()
+
+    /** Best match by whole words: "akash" finds "Akash S" but never "Prakash". */
     private fun findContact(c: Context, name: String): Pair<String, String>? {
+        val q = cleanName(name)
+        if (q.isEmpty()) return null
         val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
         val proj = arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER)
-        c.contentResolver.query(uri, proj, "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME} LIKE ?", arrayOf("%$name%"), null)?.use { cur ->
-            if (cur.moveToFirst()) return Pair(cur.getString(0), cur.getString(1))
+        var best: Pair<String, String>? = null
+        var bestScore = 0
+        c.contentResolver.query(uri, proj, null, null, null)?.use { cur ->
+            while (cur.moveToNext()) {
+                val dn = cur.getString(0) ?: continue
+                val num = cur.getString(1) ?: continue
+                val full = cleanName(dn)
+                val tokens = full.split(" ")
+                val score = when {
+                    full == q -> 100
+                    tokens.contains(q) -> 80
+                    q.contains(" ") && (full.startsWith(q) || full.contains(" $q")) -> 70
+                    tokens.any { it.startsWith(q) } -> 60
+                    else -> 0
+                }
+                if (score > bestScore) {
+                    bestScore = score
+                    best = Pair(dn, num)
+                }
+            }
         }
-        return null
+        return best
     }
 
     private fun contactFor(c: Context, q: String): Pair<String, String>? {
@@ -552,6 +636,14 @@ object Brain {
 
     private fun doMedia(c: Context, arg: String): String {
         val a = arg.trim().lowercase()
+        if (LocalPlayer.hasTrack()) {
+            when (a) {
+                "play" -> return LocalPlayer.resume()
+                "pause" -> return LocalPlayer.pause()
+                "next" -> return LocalPlayer.next()
+                "previous" -> return LocalPlayer.previous()
+            }
+        }
         val code = when (a) {
             "play" -> KeyEvent.KEYCODE_MEDIA_PLAY
             "pause" -> KeyEvent.KEYCODE_MEDIA_PAUSE
@@ -563,6 +655,37 @@ object Brain {
         am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
         am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
         return "Sent $a to your music player."
+    }
+
+    private fun pressPlayLater(c: Context, ms: Long) {
+        Thread {
+            try { Thread.sleep(ms) } catch (_: Exception) {}
+            try { doMedia(c, "play") } catch (_: Exception) {}
+        }.start()
+    }
+
+    private fun doPlaySong(c: Context, arg: String): String {
+        val wantSpotify = Regex("(on|in|using|with) spotify", RegexOption.IGNORE_CASE).containsMatchIn(arg)
+        val q = arg.replace(Regex("\\s*(on|in|using|with) spotify", RegexOption.IGNORE_CASE), "").trim()
+        if (!wantSpotify) {
+            val r = LocalPlayer.play(c, q.ifEmpty { null })
+            if (LocalPlayer.hasTrack() || r.startsWith("I need permission")) return r
+        }
+        val spotify = "com.spotify.music"
+        val hasSpotify = try { c.packageManager.getPackageInfo(spotify, 0); true } catch (e: Exception) { false }
+        if (q.isNotEmpty()) {
+            val i = Intent(MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH)
+                .putExtra(MediaStore.EXTRA_MEDIA_FOCUS, "vnd.android.cursor.item/*")
+                .putExtra(SearchManager.QUERY, q)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            if (hasSpotify) i.setPackage(spotify)
+            (JarvisAccess.inst ?: c).startActivity(i)
+            pressPlayLater(c, 3500)
+            return "Asking ${if (hasSpotify) "Spotify" else "your music app"} to play $q."
+        }
+        if (hasSpotify && !launch(c, spotify)) return "I could not open Spotify."
+        pressPlayLater(c, 2500)
+        return if (hasSpotify) "Opening Spotify and pressing play." else "Pressing play on your music player."
     }
 
     private fun doTimer(c: Context, arg: String): String {

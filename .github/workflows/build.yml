@@ -8,12 +8,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Download wake-word model
+      - name: Download wake-word and hand-tracking models
         run: |
           mkdir -p app/src/main/assets
           curl -L -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip
           unzip -q model.zip
           mv vosk-model-small-en-us-0.15 app/src/main/assets/model
+          curl -L -o app/src/main/assets/hand_landmarker.task https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
+          ls -l app/src/main/assets/hand_landmarker.task
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

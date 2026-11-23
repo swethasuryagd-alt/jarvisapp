@@ -1,7 +1,6 @@
 package com.jarvis.app
 
 import android.Manifest
-import android.app.Activity
 import android.app.AlertDialog
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -30,6 +29,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.ComponentActivity
 import androidx.core.content.ContextCompat
 import java.util.Calendar
 
@@ -40,9 +40,9 @@ private val ACCENT = Color.parseColor("#22D3EE")
 private val DIM = Color.parseColor("#8A8A99")
 private val LINE = Color.parseColor("#1F4A57")
 
-class MainActivity : Activity() {
+class MainActivity : ComponentActivity() {
 
-    private lateinit var sphere: ReactorView
+    private lateinit var suit: SuitView
     private lateinit var barsL: BarsView
     private lateinit var barsR: BarsView
     private lateinit var statusRow: LinearLayout
@@ -59,6 +59,7 @@ class MainActivity : Activity() {
     private lateinit var controls: LinearLayout
     private lateinit var tabs: LinearLayout
 
+    private var tracker: HandTracker? = null
     private var chatMode = false
     private val ui = Handler(Looper.getMainLooper())
 
@@ -66,7 +67,11 @@ class MainActivity : Activity() {
         override fun onReceive(c: Context, i: Intent) {
             val who = i.getStringExtra("who") ?: ""
             val msg = i.getStringExtra("text") ?: ""
-            if (who == "Status") runOnUiThread { subtitle.text = msg } else addMessage(who, msg)
+            when (who) {
+                "Status" -> runOnUiThread { subtitle.text = msg }
+                "State" -> handleState(msg)
+                else -> addMessage(who, msg)
+            }
         }
     }
 
@@ -123,6 +128,11 @@ class MainActivity : Activity() {
         title.textSize = 22f
         title.setTextColor(Color.WHITE)
         top.addView(title, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
+        val cam = IconView(this, IconView.CAMERA)
+        cam.setOnClickListener { toggleCamera() }
+        val camLp = FrameLayout.LayoutParams(dp(48), dp(48), Gravity.END or Gravity.CENTER_VERTICAL)
+        camLp.rightMargin = dp(46)
+        top.addView(cam, camLp)
         val gear = IconView(this, IconView.GEAR)
         gear.setOnClickListener { showSettings() }
         top.addView(gear, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.END or Gravity.CENTER_VERTICAL))
@@ -145,33 +155,31 @@ class MainActivity : Activity() {
         statusRow.visibility = View.GONE
         main.addView(statusRow, LinearLayout.LayoutParams(-1, dp(28)))
 
-        // ----- home: spacer, orb, greeting -----
+        // ----- home: the nano-tech suit and greeting -----
         topSpace = View(this)
-        main.addView(topSpace, LinearLayout.LayoutParams(-1, 0, 1f))
+        main.addView(topSpace, LinearLayout.LayoutParams(-1, 0, 0.15f))
 
-        sphere = ReactorView(this)
-        sphere.setOnClickListener { micCapture() }
-        val sphereLp = LinearLayout.LayoutParams(dp(240), dp(240))
-        sphereLp.gravity = Gravity.CENTER_HORIZONTAL
-        main.addView(sphere, sphereLp)
+        suit = SuitView(this)
+        suit.onDouble = { micCapture() }
+        main.addView(suit, LinearLayout.LayoutParams(-1, dp(330)))
 
         greeting = TextView(this)
         greeting.text = "${greetWord()}, Boss."
         greeting.typeface = Typeface.SERIF
-        greeting.textSize = 34f
+        greeting.textSize = 30f
         greeting.setTextColor(Color.WHITE)
         greeting.gravity = Gravity.CENTER
-        main.addView(greeting, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(28) })
+        main.addView(greeting, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(6) })
 
         subtitle = TextView(this)
-        subtitle.textSize = 14f
+        subtitle.textSize = 13f
         subtitle.setTextColor(DIM)
         subtitle.gravity = Gravity.CENTER
         subtitle.setPadding(dp(24), 0, dp(24), 0)
-        main.addView(subtitle, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(10) })
+        main.addView(subtitle, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
 
         bottomSpace = View(this)
-        main.addView(bottomSpace, LinearLayout.LayoutParams(-1, 0, 1f))
+        main.addView(bottomSpace, LinearLayout.LayoutParams(-1, 0, 0.5f))
 
         // ----- chat list (chat mode) -----
         chatList = LinearLayout(this)
@@ -257,13 +265,38 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         try { unregisterReceiver(rx) } catch (_: Exception) {}
+        stopCamera()
         super.onStop()
     }
 
     override fun onResume() {
         super.onResume()
-        subtitle.text = if (JarvisService.active) "Listening for “Jarvis” in the background"
-        else "Tap the orb and speak — or open settings to start background listening"
+        subtitle.text = if (JarvisService.active) "Say “Jarvis”, double-tap the suit, or tap your AirPods"
+        else "Double-tap the suit and speak. Drag to turn it. Tap = faceplate, hold = parts apart."
+        if (tracker == null && Brain.prefs(this).getBoolean("camstart", false) &&
+            checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) toggleCamera()
+    }
+
+    // ------------------------------------------------------------------ hand control (camera is on only when you ask)
+
+    private fun stopCamera() {
+        tracker?.stop()
+        tracker = null
+    }
+
+    private fun toggleCamera() {
+        if (tracker?.running == true) {
+            stopCamera()
+            subtitle.text = "Hand control off."
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(arrayOf(Manifest.permission.CAMERA), 4)
+            return
+        }
+        val t = HandTracker(this, { dy, dp -> suit.rotateBy(dy, dp) }, { msg -> runOnUiThread { subtitle.text = msg } })
+        tracker = t
+        t.start()
     }
 
     // ------------------------------------------------------------------ modes
@@ -279,10 +312,7 @@ class MainActivity : Activity() {
         statusRow.visibility = vis(chat)
         chatScroll.visibility = vis(chat)
         controls.visibility = vis(chat)
-        val size = if (chat) dp(88) else dp(240)
-        val lp = LinearLayout.LayoutParams(size, size)
-        lp.gravity = Gravity.CENTER_HORIZONTAL
-        sphere.layoutParams = lp
+        suit.layoutParams = LinearLayout.LayoutParams(-1, if (chat) dp(130) else dp(330))
     }
 
     private fun goHome() {
@@ -332,7 +362,24 @@ class MainActivity : Activity() {
         statusText.text = s ?: ""
         barsL.active = animate
         barsR.active = animate
-        sphere.energy = energy
+        suit.energy = energy
+    }
+
+    /** Live state from the background listener, so the suit reacts when you just say "Jarvis". */
+    private fun handleState(s: String) {
+        when {
+            s == "listening" -> {
+                setMode(true)
+                setStatus("Listening…", 0.8f, true)
+            }
+            s == "thinking" -> setStatus("Thinking…", 0.4f, false)
+            s.startsWith("speaking:") -> {
+                val len = s.substringAfter(":").toIntOrNull() ?: 40
+                setStatus("Jarvis is speaking", 0.9f, false)
+                ui.postDelayed({ setStatus(null) }, minOf(9000L, 1500L + len * 55L))
+            }
+            else -> setStatus(null)
+        }
     }
 
     private fun finishReply(reply: String, speak: Boolean) {
@@ -376,7 +423,10 @@ class MainActivity : Activity() {
 
     private fun micCapture() {
         if (JarvisService.active) {
-            addMessage("Jarvis", "Background listening is on, so just say “Jarvis”. Turn it off in settings to use this button.")
+            // the background listener is already running: just tell it to listen right now
+            JarvisService.trigger = true
+            setMode(true)
+            setStatus("Listening…", 0.8f, true)
             return
         }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -399,8 +449,9 @@ class MainActivity : Activity() {
                     return@Thread
                 }
                 setStatus("Thinking…", 0.4f, false)
+                Brain.warmUp()
                 val speakOn = Brain.prefs(this).getBoolean("speak", true)
-                val (heard, answer) = Brain.handleAudio(this, wav, LocalStt.transcribe(wav)) { interim ->
+                val (heard, answer) = Brain.handleAudio(this, wav, LocalStt.transcribe(wav, false)) { interim ->
                     addMessage("Jarvis", interim)
                     if (speakOn) Speaker.speak(this, interim) { m -> addMessage("Jarvis", m) }
                 }
@@ -428,11 +479,13 @@ class MainActivity : Activity() {
             return
         }
         ContextCompat.startForegroundService(this, Intent(this, JarvisService::class.java))
+        subtitle.text = "Starting the listener…"
     }
 
     override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, res: IntArray) {
         super.onRequestPermissionsResult(code, perms, res)
         if (code == 1 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startListening()
+        if (code == 4 && checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) toggleCamera()
     }
 
     // --------------------------------------------------------------- settings
@@ -463,15 +516,7 @@ class MainActivity : Activity() {
         val box = LinearLayout(this)
         box.orientation = LinearLayout.VERTICAL
         box.setPadding(dp(20), dp(12), dp(20), dp(4))
-        val groq = EditText(this)
-        groq.hint = "Gemini API key"
-        groq.setText(p.getString("gemini", ""))
-        groq.setSingleLine()
-        groq.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        val cutoff = EditText(this)
-        cutoff.hint = "Auto-off battery %"
-        cutoff.setText(p.getInt("cutoff", 30).toString())
-        cutoff.inputType = InputType.TYPE_CLASS_NUMBER
+
         fun field(hint: String, value: String): EditText {
             val e = EditText(this)
             e.hint = hint
@@ -479,21 +524,34 @@ class MainActivity : Activity() {
             e.setSingleLine()
             return e
         }
-        val model = field("AI model", p.getString("model", "") ?: "")
-        model.hint = "AI model (blank = automatic)"
-        val rate = field("Voice speed", p.getFloat("rate", 1.0f).toString())
-        rate.hint = "Voice speed (1.0 = normal)"
-        val pitch = field("Voice pitch", p.getFloat("pitch", 1.0f).toString())
-        pitch.hint = "Voice pitch (1.0 = normal, lower = deeper)"
-        val speakBox = CheckBox(this)
-        speakBox.text = "Speak replies aloud"
-        speakBox.isChecked = p.getBoolean("speak", true)
+        fun check(label: String, on: Boolean): CheckBox {
+            val c = CheckBox(this)
+            c.text = label
+            c.isChecked = on
+            return c
+        }
+
+        val gemini = field("Gemini API key", p.getString("gemini", "") ?: "")
+        gemini.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+        val cutoff = field("Auto-off battery %", p.getInt("cutoff", 30).toString())
+        cutoff.inputType = InputType.TYPE_CLASS_NUMBER
+        val model = field("AI model (blank = automatic)", p.getString("model", "") ?: "")
+        val rate = field("Voice speed (1.0 = normal)", p.getFloat("rate", 1.0f).toString())
+        val pitch = field("Voice pitch (1.0 = normal, lower = deeper)", p.getFloat("pitch", 1.0f).toString())
+        val speakBox = check("Speak replies aloud", p.getBoolean("speak", true))
+        val airBox = check("AirPods / headset button starts Jarvis", p.getBoolean("airpods", true))
+        val btBox = check("Use the AirPods / headset microphone", p.getBoolean("bt", false))
+        val camBox = check("Open the camera for hand control when I enter the app", p.getBoolean("camstart", false))
+
         fun save() {
-            p.edit().putString("gemini", groq.text.toString().trim())
+            p.edit().putString("gemini", gemini.text.toString().trim())
                 .putString("model", model.text.toString().trim())
                 .putFloat("rate", rate.text.toString().toFloatOrNull()?.coerceIn(0.5f, 2.0f) ?: 1.0f)
                 .putFloat("pitch", pitch.text.toString().toFloatOrNull()?.coerceIn(0.5f, 2.0f) ?: 1.0f)
                 .putBoolean("speak", speakBox.isChecked)
+                .putBoolean("airpods", airBox.isChecked)
+                .putBoolean("bt", btBox.isChecked)
+                .putBoolean("camstart", camBox.isChecked)
                 .putInt("cutoff", cutoff.text.toString().toIntOrNull() ?: 30).apply()
         }
         fun btn(label: String, f: () -> Unit): Button {
@@ -503,12 +561,18 @@ class MainActivity : Activity() {
             bt.setOnClickListener { save(); f() }
             return bt
         }
-        box.addView(groq)
+
+        box.addView(gemini)
         box.addView(cutoff)
         box.addView(model)
         box.addView(rate)
         box.addView(pitch)
         box.addView(speakBox)
+        box.addView(airBox)
+        box.addView(btBox)
+        box.addView(camBox)
+        box.addView(btn("Start background listening") { startListening() })
+        box.addView(btn("Stop background listening") { stopService(Intent(this, JarvisService::class.java)) })
         box.addView(btn("Choose voice") { pickVoice() })
         box.addView(btn("Test voice") {
             Speaker.speak(this, "Hello Boss, I am Jarvis.") { msg ->
@@ -516,13 +580,19 @@ class MainActivity : Activity() {
             }
         })
         box.addView(btn("Allow calling and contacts") {
-            requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.CALL_PHONE, Manifest.permission.ANSWER_PHONE_CALLS), 3)
+            requestPermissions(arrayOf(Manifest.permission.READ_CONTACTS, Manifest.permission.CALL_PHONE,
+                Manifest.permission.ANSWER_PHONE_CALLS), 3)
+        })
+        box.addView(btn("Allow music files") {
+            val perm = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
+            requestPermissions(arrayOf(perm), 5)
+        })
+        box.addView(btn("Allow Bluetooth (AirPods microphone)") {
+            if (Build.VERSION.SDK_INT >= 31) requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), 6)
         })
         box.addView(btn("Allow brightness control") {
             startActivity(Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS, Uri.parse("package:$packageName")))
         })
-        box.addView(btn("Start background listening") { startListening() })
-        box.addView(btn("Stop background listening") { stopService(Intent(this, JarvisService::class.java)) })
         box.addView(btn("Accessibility settings") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
         box.addView(btn("Allow display over other apps") {
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))

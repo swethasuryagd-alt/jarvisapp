@@ -86,6 +86,11 @@ object Speaker {
         }
     }
 
+    /** Start the voice engine early so the first reply is not delayed. */
+    fun warm(c: Context) {
+        withTts(c, null) { _ -> }
+    }
+
     fun stop() {
         try { tts?.stop() } catch (_: Exception) {}
     }

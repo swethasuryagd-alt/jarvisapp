@@ -9,9 +9,11 @@ import android.graphics.RadialGradient
 import android.graphics.RectF
 import android.graphics.Shader
 import android.os.SystemClock
+import android.view.MotionEvent
 import android.view.View
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.math.sqrt
 
 /** Arc-reactor / HUD style orb. energy 0..1 = faster rotation, brighter pulse and ripples. */
 class ReactorView(ctx: Context) : View(ctx) {
@@ -167,6 +169,7 @@ class IconView(ctx: Context, private val kind: Int, tint: Int = Color.parseColor
         const val X = 3
         const val PLUS = 4
         const val KEYBOARD = 5
+        const val CAMERA = 6
     }
 
     private val d = resources.displayMetrics.density
@@ -216,6 +219,13 @@ class IconView(ctx: Context, private val kind: Int, tint: Int = Color.parseColor
                 c.drawRoundRect(RectF(cx - r * 1.1f, cy - r * 0.6f, cx + r * 1.1f, cy + r * 0.6f), r * 0.2f, r * 0.2f, p)
                 for (i in 0 until 4) c.drawPoint(cx - r * 0.6f + i * r * 0.4f, cy - r * 0.2f, p)
                 c.drawLine(cx - r * 0.5f, cy + r * 0.25f, cx + r * 0.5f, cy + r * 0.25f, p)
+            }
+            CAMERA -> {
+                c.drawRoundRect(RectF(cx - r * 1.0f, cy - r * 0.55f, cx + r * 1.0f, cy + r * 0.7f), r * 0.2f, r * 0.2f, p)
+                c.drawCircle(cx, cy + r * 0.07f, r * 0.38f, p)
+                c.drawLine(cx - r * 0.35f, cy - r * 0.55f, cx - r * 0.2f, cy - r * 0.85f, p)
+                c.drawLine(cx - r * 0.2f, cy - r * 0.85f, cx + r * 0.2f, cy - r * 0.85f, p)
+                c.drawLine(cx + r * 0.2f, cy - r * 0.85f, cx + r * 0.35f, cy - r * 0.55f, p)
             }
         }
     }
