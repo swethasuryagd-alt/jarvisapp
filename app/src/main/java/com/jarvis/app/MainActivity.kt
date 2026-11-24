@@ -15,8 +15,11 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
+import android.text.Editable
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.view.inputmethod.EditorInfo
@@ -42,7 +45,7 @@ private val LINE = Color.parseColor("#1F4A57")
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var suit: SuitView
+    private lateinit var suit: HudView
     private lateinit var barsL: BarsView
     private lateinit var barsR: BarsView
     private lateinit var statusRow: LinearLayout
@@ -59,7 +62,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var controls: LinearLayout
     private lateinit var tabs: LinearLayout
 
-    private var tracker: HandTracker? = null
     private var chatMode = false
     private val ui = Handler(Looper.getMainLooper())
 
@@ -67,10 +69,11 @@ class MainActivity : ComponentActivity() {
         override fun onReceive(c: Context, i: Intent) {
             val who = i.getStringExtra("who") ?: ""
             val msg = i.getStringExtra("text") ?: ""
+            val info = i.getStringExtra("info") ?: ""
             when (who) {
                 "Status" -> runOnUiThread { subtitle.text = msg }
                 "State" -> handleState(msg)
-                else -> addMessage(who, msg)
+                else -> addMessage(who, msg, info)
             }
         }
     }
@@ -128,11 +131,6 @@ class MainActivity : ComponentActivity() {
         title.textSize = 22f
         title.setTextColor(Color.WHITE)
         top.addView(title, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
-        val cam = IconView(this, IconView.CAMERA)
-        cam.setOnClickListener { toggleCamera() }
-        val camLp = FrameLayout.LayoutParams(dp(48), dp(48), Gravity.END or Gravity.CENTER_VERTICAL)
-        camLp.rightMargin = dp(46)
-        top.addView(cam, camLp)
         val gear = IconView(this, IconView.GEAR)
         gear.setOnClickListener { showSettings() }
         top.addView(gear, FrameLayout.LayoutParams(dp(48), dp(48), Gravity.END or Gravity.CENTER_VERTICAL))
@@ -159,9 +157,9 @@ class MainActivity : ComponentActivity() {
         topSpace = View(this)
         main.addView(topSpace, LinearLayout.LayoutParams(-1, 0, 0.15f))
 
-        suit = SuitView(this)
+        suit = HudView(this)
         suit.onDouble = { micCapture() }
-        main.addView(suit, LinearLayout.LayoutParams(-1, dp(330)))
+        main.addView(suit, LinearLayout.LayoutParams(-1, dp(340)))
 
         greeting = TextView(this)
         greeting.text = "${greetWord()}, Boss."
@@ -216,6 +214,11 @@ class MainActivity : ComponentActivity() {
         input.setSingleLine()
         input.imeOptions = EditorInfo.IME_ACTION_SEND
         input.setOnEditorActionListener { _, _, _ -> sendTyped(); true }
+        input.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(a: CharSequence?, st: Int, c: Int, af: Int) {}
+            override fun onTextChanged(a: CharSequence?, st: Int, b: Int, c: Int) { suit.blinkNow() }
+            override fun afterTextChanged(e: Editable?) {}
+        })
         inputRow.addView(input, LinearLayout.LayoutParams(0, -2, 1f))
         val send = TextView(this)
         send.text = "Send"
@@ -265,38 +268,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onStop() {
         try { unregisterReceiver(rx) } catch (_: Exception) {}
-        stopCamera()
         super.onStop()
     }
 
     override fun onResume() {
         super.onResume()
         subtitle.text = if (JarvisService.active) "Say “Jarvis”, double-tap the suit, or tap your AirPods"
-        else "Double-tap the suit and speak. Drag to turn it. Tap = faceplate, hold = parts apart."
-        if (tracker == null && Brain.prefs(this).getBoolean("camstart", false) &&
-            checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) toggleCamera()
-    }
-
-    // ------------------------------------------------------------------ hand control (camera is on only when you ask)
-
-    private fun stopCamera() {
-        tracker?.stop()
-        tracker = null
-    }
-
-    private fun toggleCamera() {
-        if (tracker?.running == true) {
-            stopCamera()
-            subtitle.text = "Hand control off."
-            return
-        }
-        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.CAMERA), 4)
-            return
-        }
-        val t = HandTracker(this, { dy, dp -> suit.rotateBy(dy, dp) }, { msg -> runOnUiThread { subtitle.text = msg } })
-        tracker = t
-        t.start()
+        else "Double-tap Jarvis and speak, or tap Type. Tap Jarvis = blink, hold = rebuild."
     }
 
     // ------------------------------------------------------------------ modes
@@ -312,7 +290,8 @@ class MainActivity : ComponentActivity() {
         statusRow.visibility = vis(chat)
         chatScroll.visibility = vis(chat)
         controls.visibility = vis(chat)
-        suit.layoutParams = LinearLayout.LayoutParams(-1, if (chat) dp(130) else dp(330))
+        suit.compact = chat
+        suit.layoutParams = LinearLayout.LayoutParams(-1, if (chat) dp(150) else dp(340))
     }
 
     private fun goHome() {
@@ -330,12 +309,12 @@ class MainActivity : ComponentActivity() {
 
     // --------------------------------------------------------------- messages
 
-    private fun addMessage(who: String, msg: String) = runOnUiThread {
+    private fun addMessage(who: String, msg: String, info: String = "") = runOnUiThread {
         if (msg.isBlank()) return@runOnUiThread
         setMode(true)
         val mine = (who == "You" || who == "Boss")
         val label = TextView(this)
-        label.text = if (mine) "Boss" else "Jarvis"
+        label.text = if (mine) "Boss" else if (info.isNotEmpty()) "Jarvis · $info" else "Jarvis"
         label.setTextColor(DIM)
         label.textSize = 11f
         label.setPadding(dp(6), 0, dp(6), dp(3))
@@ -411,12 +390,14 @@ class MainActivity : ComponentActivity() {
         addMessage("Boss", t)
         setStatus("Thinking…", 0.4f, false)
         Thread {
+            val t0 = SystemClock.elapsedRealtime()
             val speakOn = Brain.prefs(this).getBoolean("speak", true)
             val reply = Brain.handle(this, t) { interim ->
                 addMessage("Jarvis", interim)
                 if (speakOn) Speaker.speak(this, interim) { m -> addMessage("Jarvis", m) }
             }
-            addMessage("Jarvis", reply)
+            val secs = (SystemClock.elapsedRealtime() - t0) / 100 / 10.0
+            addMessage("Jarvis", reply, "${secs}s · ${Brain.lastTiming}")
             finishReply(reply, true)
         }.start()
     }
@@ -450,14 +431,21 @@ class MainActivity : ComponentActivity() {
                 }
                 setStatus("Thinking…", 0.4f, false)
                 Brain.warmUp()
+                val t0 = SystemClock.elapsedRealtime()
                 val speakOn = Brain.prefs(this).getBoolean("speak", true)
-                val (heard, answer) = Brain.handleAudio(this, wav, LocalStt.transcribe(wav, false)) { interim ->
+                val cands = ArrayList<String>()
+                val g = LocalStt.transcribe(wav, true) ?: ""
+                val free = LocalStt.transcribe(wav, false) ?: ""
+                if (g.isNotBlank() && (g.contains(' ') || free.contains(g))) cands.add(g)
+                if (free.isNotBlank()) cands.add(free)
+                val (heard, answer) = Brain.handleAudio(this, wav, cands) { interim ->
                     addMessage("Jarvis", interim)
                     if (speakOn) Speaker.speak(this, interim) { m -> addMessage("Jarvis", m) }
                 }
                 if (heard.isBlank()) { setStatus(null); return@Thread }
+                val secs = (SystemClock.elapsedRealtime() - t0) / 100 / 10.0
                 addMessage("Boss", heard)
-                addMessage("Jarvis", answer)
+                addMessage("Jarvis", answer, "${secs}s · ${Brain.lastTiming}")
                 finishReply(answer, true)
             } catch (e: Exception) {
                 addMessage("Jarvis", "Error: ${e.message}")
@@ -485,7 +473,6 @@ class MainActivity : ComponentActivity() {
     override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, res: IntArray) {
         super.onRequestPermissionsResult(code, perms, res)
         if (code == 1 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startListening()
-        if (code == 4 && checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) toggleCamera()
     }
 
     // --------------------------------------------------------------- settings
@@ -541,7 +528,6 @@ class MainActivity : ComponentActivity() {
         val speakBox = check("Speak replies aloud", p.getBoolean("speak", true))
         val airBox = check("AirPods / headset button starts Jarvis", p.getBoolean("airpods", true))
         val btBox = check("Use the AirPods / headset microphone", p.getBoolean("bt", false))
-        val camBox = check("Open the camera for hand control when I enter the app", p.getBoolean("camstart", false))
 
         fun save() {
             p.edit().putString("gemini", gemini.text.toString().trim())
@@ -551,7 +537,6 @@ class MainActivity : ComponentActivity() {
                 .putBoolean("speak", speakBox.isChecked)
                 .putBoolean("airpods", airBox.isChecked)
                 .putBoolean("bt", btBox.isChecked)
-                .putBoolean("camstart", camBox.isChecked)
                 .putInt("cutoff", cutoff.text.toString().toIntOrNull() ?: 30).apply()
         }
         fun btn(label: String, f: () -> Unit): Button {
@@ -570,7 +555,6 @@ class MainActivity : ComponentActivity() {
         box.addView(speakBox)
         box.addView(airBox)
         box.addView(btBox)
-        box.addView(camBox)
         box.addView(btn("Start background listening") { startListening() })
         box.addView(btn("Stop background listening") { stopService(Intent(this, JarvisService::class.java)) })
         box.addView(btn("Choose voice") { pickVoice() })

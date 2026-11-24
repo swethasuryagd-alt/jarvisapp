@@ -141,6 +141,7 @@ class JarvisService : Service() {
             }
             model = Model(dir.absolutePath)
             LocalStt.model = model
+            try { LocalStt.buildGrammar(this) } catch (_: Exception) {}
         } catch (e: Throwable) {
             say("Status", "Model failed: ${e.message}")
             notifyMsg("Wake word model failed: ${e.message}")
@@ -240,7 +241,7 @@ class JarvisService : Service() {
         val pre = ArrayDeque<ByteArray>()
         val utter = ByteArrayOutputStream()
         var floor = 60.0
-        var gain = 4f
+        var gain = 6f
         var feeding = false
         var captured = false
         var lastVoice = 0L
@@ -271,13 +272,13 @@ class JarvisService : Service() {
                 val rms = Math.sqrt(sum / (n / 2))
                 val now = SystemClock.uptimeMillis()
                 if (rms < floor * 1.6) floor += (rms - floor) * 0.05 else floor += (rms - floor) * 0.002
-                val voice = rms > maxOf(floor * 2.5, 90.0)
+                val voice = rms > maxOf(floor * 2.2, 70.0)
                 if (voice) {
                     lastVoice = now
-                    val desired = (4500f / maxOf(rms.toFloat(), 1f)).coerceIn(2f, 14f)
+                    val desired = (8000f / maxOf(rms.toFloat(), 1f)).coerceIn(3f, 24f)
                     gain += (desired - gain) * 0.25f
                 } else {
-                    gain += (6f - gain) * 0.01f
+                    gain += (9f - gain) * 0.01f
                 }
                 amp(buf, n, gain)
 
@@ -346,7 +347,7 @@ class JarvisService : Service() {
                             return done()
                         }
                     }
-                    if (total > 20000 || utter.size() > 640000) return done()
+                    if (total > 9000 || utter.size() > 300000) return done()
                 }
             }
         } finally {
@@ -358,17 +359,23 @@ class JarvisService : Service() {
     }
 
     private fun handleCommand(wav: ByteArray) {
+        val t0 = SystemClock.elapsedRealtime()
         say("State", "thinking")
         try {
-            val localText = lastTranscript.ifBlank { null }
+            val free = lastTranscript
+            val g = LocalStt.transcribe(wav, true) ?: ""
+            val cands = ArrayList<String>()
+            if (g.isNotBlank() && (g.contains(' ') || free.contains(g))) cands.add(g)
+            if (free.isNotBlank()) cands.add(free)
             val speakOn = Brain.prefs(this).getBoolean("speak", true)
-            val (heard, answer) = Brain.handleAudio(this, wav, localText) { interim ->
+            val (heard, answer) = Brain.handleAudio(this, wav, cands) { interim ->
                 say("Jarvis", interim)
                 if (speakOn) Speaker.speak(this, interim) { m -> say("Jarvis", m) }
             }
             if (heard.isNotBlank()) say("You", heard)
             if (answer.isNotBlank()) {
-                say("Jarvis", answer)
+                val secs = (SystemClock.elapsedRealtime() - t0) / 100 / 10.0
+                say("Jarvis", answer, "${secs}s · ${Brain.lastTiming}")
                 if (speakOn) Speaker.speak(this, answer) { m -> say("Jarvis", m) }
                 say("State", if (speakOn) "speaking:${answer.length}" else "idle")
             } else {
@@ -380,9 +387,9 @@ class JarvisService : Service() {
         }
     }
 
-    private fun say(who: String, text: String) {
+    private fun say(who: String, text: String, info: String = "") {
         sendBroadcast(Intent("com.jarvis.app.MSG").setPackage(packageName)
-            .putExtra("who", who).putExtra("text", text))
+            .putExtra("who", who).putExtra("text", text).putExtra("info", info))
     }
 
     private fun notifyMsg(msg: String) {

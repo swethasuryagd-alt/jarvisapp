@@ -60,6 +60,27 @@ object Recorder {
         return if (speaking) toWav(pcm.toByteArray()) else null
     }
 
+    /** Makes a small 8 kHz copy of a 16 kHz WAV for uploading (about half the size; speech is still clear). */
+    fun to8k(wav: ByteArray): ByteArray {
+        if (wav.size <= 44) return wav
+        val n = (wav.size - 44) / 2
+        val src = ByteBuffer.wrap(wav, 44, wav.size - 44).order(ByteOrder.LITTLE_ENDIAN)
+        val m = n / 2
+        val out = ByteBuffer.allocate(m * 2).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until m) {
+            val a = src.getShort(44 + (2 * i) * 2).toInt()
+            val b = src.getShort(44 + (2 * i + 1) * 2).toInt()
+            out.putShort(((a + b) / 2).toShort())
+        }
+        val pcm = out.array()
+        val h = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
+        h.put("RIFF".toByteArray()); h.putInt(36 + pcm.size); h.put("WAVE".toByteArray())
+        h.put("fmt ".toByteArray()); h.putInt(16); h.putShort(1); h.putShort(1)
+        h.putInt(8000); h.putInt(16000); h.putShort(2); h.putShort(16)
+        h.put("data".toByteArray()); h.putInt(pcm.size)
+        return h.array() + pcm
+    }
+
     /** 16-bit mono PCM -> WAV, boosting quiet recordings so soft voices are still understood. */
     fun toWav(pcmIn: ByteArray): ByteArray {
         val n = pcmIn.size / 2
@@ -69,7 +90,7 @@ object Recorder {
             val v = Math.abs(src.getShort(i * 2).toInt())
             if (v > peak) peak = v
         }
-        val gain = if (peak < 12000) minOf(16.0, 20000.0 / peak) else 1.0
+        val gain = if (peak < 16000) minOf(20.0, 26000.0 / peak) else 1.0
         val out = ByteBuffer.allocate(n * 2).order(ByteOrder.LITTLE_ENDIAN)
         for (i in 0 until n) {
             val v = (src.getShort(i * 2) * gain).toInt().coerceIn(-32768, 32767)

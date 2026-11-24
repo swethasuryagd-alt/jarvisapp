@@ -14,6 +14,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
+import android.os.SystemClock
 import android.provider.AlarmClock
 import android.provider.ContactsContract
 import android.provider.MediaStore
@@ -71,6 +72,8 @@ object Brain {
 
     fun prefs(c: Context) = c.getSharedPreferences("jarvis", Context.MODE_PRIVATE)
 
+    @Volatile var lastTiming = ""
+
     fun clearHistory() { history.clear() }
 
     /** Opens the internet connection to Gemini early (while you are still talking) so the answer comes back sooner. */
@@ -119,10 +122,13 @@ object Brain {
 
     // ---------------------------------------------------------------- spoken audio
     /** Returns (what you said, Jarvis's answer). localText is the instant offline transcript, if there is one. Throws on errors. */
-    fun handleAudio(c: Context, wav: ByteArray, localText: String?, onInterim: ((String) -> Unit)? = null): Pair<String, String> {
-        if (!localText.isNullOrBlank()) {
+    fun handleAudio(c: Context, wav: ByteArray, localTexts: List<String>, onInterim: ((String) -> Unit)? = null): Pair<String, String> {
+        // 1) instant: try the offline transcripts first, so "open instagram" runs at once
+        for (localText in localTexts) {
+            if (localText.isBlank()) continue
             val quick = tryLocal(c, localText)
             if (quick != null) {
+                lastTiming = "instant, offline"
                 remember("user", localText)
                 remember("model", quick)
                 return Pair(localText, quick)
@@ -161,7 +167,7 @@ object Brain {
 
     private fun askAudio(c: Context, wav: ByteArray): Ans {
         val audio = JSONObject().put("inline_data",
-            JSONObject().put("mime_type", "audio/wav").put("data", Base64.encodeToString(wav, Base64.NO_WRAP)))
+            JSONObject().put("mime_type", "audio/wav").put("data", Base64.encodeToString(Recorder.to8k(wav), Base64.NO_WRAP)))
         val ask = JSONObject().put("text", AUDIO_ASK)
         val contents = JSONArray()
         for (m in history) contents.put(m)
@@ -205,9 +211,12 @@ object Brain {
         val tries = ArrayList<String>()
         if (custom.isNotEmpty()) tries.add(custom)
         for (m in FALLBACK) if (m !in tries) tries.add(m)
+        val chosen = tries.take(2)
 
+        val started = SystemClock.elapsedRealtime()
         var last: Exception? = null
-        for (m in tries) {
+        for (m in chosen) {
+            if (SystemClock.elapsedRealtime() - started > 20000) break
             try {
                 val conf = JSONObject(cfg.toString())
                 if (m.startsWith("gemini-2.5-flash")) conf.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
@@ -217,6 +226,8 @@ object Brain {
                     .put("generationConfig", conf)
                 if (useSearch) bodyJson.put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
                 val res = post("https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent", key, bodyJson.toString().toByteArray())
+                val secs = (SystemClock.elapsedRealtime() - started) / 100 / 10.0
+                lastTiming = "AI ${secs}s ($m)"
                 return extract(res)
             } catch (e: HttpError) {
                 last = e
@@ -227,7 +238,8 @@ object Brain {
                 last = e
             }
         }
-        throw last ?: Exception("No Gemini model worked")
+        val msg = last?.message ?: "no answer"
+        throw Exception("The AI did not answer in time ($msg). Check your internet connection.")
     }
 
     private fun extract(res: String): String {
@@ -247,8 +259,8 @@ object Brain {
         val con = URL(url).openConnection() as HttpURLConnection
         con.requestMethod = "POST"
         con.doOutput = true
-        con.connectTimeout = 10000
-        con.readTimeout = 25000
+        con.connectTimeout = 6000
+        con.readTimeout = 14000
         con.setRequestProperty("x-goog-api-key", key)
         con.setRequestProperty("Content-Type", "application/json")
         con.outputStream.use { it.write(body) }
