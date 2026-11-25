@@ -35,10 +35,18 @@ object Speaker {
     }
 
     fun speak(c: Context, text: String, onProblem: ((String) -> Unit)? = null) {
-        withTts(c, onProblem) { t -> doSpeak(c, t, text, onProblem) }
+        withTts(c, onProblem) { t ->
+            if (!doSpeak(c, t, text, onProblem)) {
+                // the engine stopped working (the phone may have closed it): start a fresh one and try again
+                resetEngine()
+                withTts(c, onProblem) { t2 ->
+                    if (!doSpeak(c, t2, text, onProblem)) onProblem?.invoke("The voice engine is not working. Check Settings > Text-to-speech.")
+                }
+            }
+        }
     }
 
-    private fun doSpeak(c: Context, t: TextToSpeech, text: String, onProblem: ((String) -> Unit)?) {
+    private fun doSpeak(c: Context, t: TextToSpeech, text: String, onProblem: ((String) -> Unit)?): Boolean {
         try {
             val p = c.getSharedPreferences("jarvis", Context.MODE_PRIVATE)
             val tamil = text.any { it in '\u0B80'..'\u0BFF' }
@@ -48,7 +56,7 @@ object Speaker {
                 val r2 = t.setLanguage(Locale.US)
                 if (r2 == TextToSpeech.LANG_MISSING_DATA || r2 == TextToSpeech.LANG_NOT_SUPPORTED) {
                     onProblem?.invoke("No voice data is installed. Open Settings > Text-to-speech and install voice data.")
-                    return
+                    return true
                 }
             }
             val name = p.getString("voice", "") ?: ""
@@ -58,10 +66,25 @@ object Speaker {
             }
             t.setSpeechRate(p.getFloat("rate", 1.0f))
             t.setPitch(p.getFloat("pitch", 1.0f))
+            try {
+                t.setAudioAttributes(
+                    android.media.AudioAttributes.Builder()
+                        .setUsage(android.media.AudioAttributes.USAGE_ASSISTANT)
+                        .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SPEECH).build()
+                )
+            } catch (_: Exception) {}
             val res = t.speak(text, TextToSpeech.QUEUE_FLUSH, null, "j")
-            if (res != TextToSpeech.SUCCESS) onProblem?.invoke("The voice engine refused to speak. Check Settings > Text-to-speech.")
+            return res == TextToSpeech.SUCCESS
         } catch (e: Exception) {
-            onProblem?.invoke("Voice error: ${e.message}")
+            return false
+        }
+    }
+
+    private fun resetEngine() {
+        synchronized(lock) {
+            try { tts?.shutdown() } catch (_: Exception) {}
+            tts = null
+            ready = false
         }
     }
 

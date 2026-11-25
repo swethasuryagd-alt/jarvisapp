@@ -142,6 +142,7 @@ class JarvisService : Service() {
             model = Model(dir.absolutePath)
             LocalStt.model = model
             try { LocalStt.buildGrammar(this) } catch (_: Exception) {}
+            Brain.refreshModels(this)
         } catch (e: Throwable) {
             say("Status", "Model failed: ${e.message}")
             notifyMsg("Wake word model failed: ${e.message}")
@@ -376,6 +377,7 @@ class JarvisService : Service() {
             if (answer.isNotBlank()) {
                 val secs = (SystemClock.elapsedRealtime() - t0) / 100 / 10.0
                 say("Jarvis", answer, "${secs}s · ${Brain.lastTiming}")
+                if (Brain.lastSuggest.isNotBlank()) say("Suggest", Brain.lastSuggest)
                 if (speakOn) Speaker.speak(this, answer) { m -> say("Jarvis", m) }
                 say("State", if (speakOn) "speaking:${answer.length}" else "idle")
             } else {

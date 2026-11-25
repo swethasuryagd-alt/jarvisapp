@@ -63,6 +63,11 @@ class MainActivity : ComponentActivity() {
     private lateinit var tabs: LinearLayout
 
     private var chatMode = false
+    private var chip: TextView? = null
+    private val hints = listOf(
+        "Try: “call akash”", "Try: “play a song”", "Try: “what is the weather today”",
+        "Try: “turn on the flashlight”", "Try: “open Instagram”", "Ask me for an idea, Boss"
+    )
     private val ui = Handler(Looper.getMainLooper())
 
     private val rx = object : BroadcastReceiver() {
@@ -73,6 +78,7 @@ class MainActivity : ComponentActivity() {
             when (who) {
                 "Status" -> runOnUiThread { subtitle.text = msg }
                 "State" -> handleState(msg)
+                "Suggest" -> addSuggestion(msg)
                 else -> addMessage(who, msg, info)
             }
         }
@@ -259,6 +265,7 @@ class MainActivity : ComponentActivity() {
         main.addView(tabs, LinearLayout.LayoutParams(-1, -2))
 
         setContentView(main)
+        Brain.refreshModels(this)
     }
 
     override fun onStart() {
@@ -274,7 +281,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         subtitle.text = if (JarvisService.active) "Say “Jarvis”, double-tap the suit, or tap your AirPods"
-        else "Double-tap Jarvis and speak, or tap Type. Tap Jarvis = blink, hold = rebuild."
+        else "Double-tap Jarvis and speak, or tap Type.  " + hints.random()
     }
 
     // ------------------------------------------------------------------ modes
@@ -334,6 +341,32 @@ class MainActivity : ComponentActivity() {
         lp.gravity = if (mine) Gravity.END else Gravity.START
         lp.setMargins(dp(16), dp(8), dp(16), dp(4))
         chatList.addView(col, lp)
+        chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
+    }
+
+    /** A tappable idea from Jarvis: tap it to run it. */
+    private fun addSuggestion(text: String) = runOnUiThread {
+        if (text.isBlank()) return@runOnUiThread
+        chip?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
+        val t = TextView(this)
+        t.text = "→  $text"
+        t.setTextColor(ACCENT)
+        t.textSize = 14f
+        t.setPadding(dp(14), dp(8), dp(14), dp(8))
+        val g = GradientDrawable()
+        g.setColor(Color.TRANSPARENT)
+        g.cornerRadius = dp(18).toFloat()
+        g.setStroke(dp(1), ACCENT)
+        t.background = g
+        t.setOnClickListener {
+            chip?.let { (it.parent as? android.view.ViewGroup)?.removeView(it) }
+            input.setText(text)
+            sendTyped()
+        }
+        val lp = LinearLayout.LayoutParams(-2, -2)
+        lp.setMargins(dp(16), dp(2), dp(16), dp(8))
+        chatList.addView(t, lp)
+        chip = t
         chatScroll.post { chatScroll.fullScroll(View.FOCUS_DOWN) }
     }
 
@@ -398,6 +431,7 @@ class MainActivity : ComponentActivity() {
             }
             val secs = (SystemClock.elapsedRealtime() - t0) / 100 / 10.0
             addMessage("Jarvis", reply, "${secs}s · ${Brain.lastTiming}")
+            if (Brain.lastSuggest.isNotBlank()) addSuggestion(Brain.lastSuggest)
             finishReply(reply, true)
         }.start()
     }
@@ -446,6 +480,7 @@ class MainActivity : ComponentActivity() {
                 val secs = (SystemClock.elapsedRealtime() - t0) / 100 / 10.0
                 addMessage("Boss", heard)
                 addMessage("Jarvis", answer, "${secs}s · ${Brain.lastTiming}")
+                if (Brain.lastSuggest.isNotBlank()) addSuggestion(Brain.lastSuggest)
                 finishReply(answer, true)
             } catch (e: Exception) {
                 addMessage("Jarvis", "Error: ${e.message}")

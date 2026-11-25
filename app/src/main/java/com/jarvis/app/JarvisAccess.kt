@@ -56,6 +56,32 @@ class JarvisAccess : AccessibilityService() {
         return (p ?: n).performAction(AccessibilityNodeInfo.ACTION_CLICK)
     }
 
+    private fun isPlayLabel(s: String): Boolean =
+        s == "play" || s == "play button" || s == "shuffle play" || s == "play top result" ||
+                (s.startsWith("play ") && !s.contains("playlist") && !s.contains("playing"))
+
+    private fun findPlay(node: AccessibilityNodeInfo?): AccessibilityNodeInfo? {
+        if (node == null) return null
+        val t = node.text?.toString()?.lowercase()?.trim() ?: ""
+        val dsc = node.contentDescription?.toString()?.lowercase()?.trim() ?: ""
+        if (isPlayLabel(t) || isPlayLabel(dsc)) return node
+        for (i in 0 until node.childCount) {
+            val r = findPlay(node.getChild(i))
+            if (r != null) return r
+        }
+        return null
+    }
+
+    /** Taps the Play button when Spotify is on screen. Returns true if it tapped something. */
+    fun clickPlay(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        if (root.packageName?.toString() != "com.spotify.music") return false
+        val n = findPlay(root) ?: return false
+        var p: AccessibilityNodeInfo? = n
+        while (p != null && !p.isClickable) p = p.parent
+        return (p ?: n).performAction(AccessibilityNodeInfo.ACTION_CLICK)
+    }
+
     /** Swipes up every gapSec seconds. If pkg is set, stops when that app leaves the screen. */
     fun startScroll(gapSec: Int, pkg: String?) {
         scrolling = true

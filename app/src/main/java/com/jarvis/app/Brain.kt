@@ -34,10 +34,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 class HttpError(val code: Int, val msg: String) : Exception("HTTP $code $msg")
 
 object Brain {
-    private class Ans(val heard: String, val reply: String, val action: String, val arg: String)
+    private class Ans(val heard: String, val reply: String, val action: String, val arg: String, val suggest: String = "")
 
     private val history = ArrayList<JSONObject>()
-    private val FALLBACK = listOf("gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash")
+    private val FALLBACK = listOf("gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.1-flash-lite")
     private val DAD = listOf("dad", "father", "papa", "appa", "daddy")
     private val MOM = listOf("mom", "mother", "mummy", "mommy", "mama", "amma")
     private const val PERM_CALL = "I need Phone permission. Open Jarvis settings and tap Allow calling and contacts."
@@ -57,13 +57,15 @@ object Brain {
             "If the user wants something one of the other actions can do, set action and arg, and keep reply to a very short acknowledgement. " +
             "If the user wants anything else that needs the phone (sending messages, closing apps, changing other settings), " +
             "leave action empty and honestly say you cannot do that yet. Never claim you did something yourself; the app confirms real actions. " +
-            "For normal knowledge questions, just answer."
+            "For normal knowledge questions, just answer. " +
+            "Fill the suggest field with one short, useful next step the user may want, written as a command they could say (at most 6 words), when it truly helps; otherwise leave it empty. " +
+            "When the user asks for ideas or advice, give one or two practical suggestions in the reply."
 
     private const val AUDIO_ASK = "Listen to the audio. Reply ONLY with JSON in this exact form: " +
-            "{\"heard\": \"the exact words spoken\", \"reply\": \"your short answer\", \"action\": \"action name or empty\", \"arg\": \"action argument or empty\"}. " +
+            "{\"heard\": \"the exact words spoken\", \"reply\": \"your short answer\", \"action\": \"action name or empty\", \"arg\": \"action argument or empty\", \"suggest\": \"short next step or empty\"}. " +
             "The speaker may begin with the word Jarvis; keep it in heard. If nothing intelligible was said, use empty strings."
 
-    private const val TEXT_HINT = "\n\n(Reply ONLY with JSON: {\"reply\": \"your short answer\", \"action\": \"action name or empty\", \"arg\": \"action argument or empty\"})"
+    private const val TEXT_HINT = "\n\n(Reply ONLY with JSON: {\"reply\": \"your short answer\", \"action\": \"action name or empty\", \"arg\": \"action argument or empty\", \"suggest\": \"short next step or empty\"})"
 
     private fun systemText(): String {
         val now = SimpleDateFormat("EEEE d MMMM yyyy, h:mm a, zzzz", Locale.ENGLISH).format(Date())
@@ -73,6 +75,7 @@ object Brain {
     fun prefs(c: Context) = c.getSharedPreferences("jarvis", Context.MODE_PRIVATE)
 
     @Volatile var lastTiming = ""
+    @Volatile var lastSuggest = ""
 
     fun clearHistory() { history.clear() }
 
@@ -117,12 +120,14 @@ object Brain {
     // ---------------------------------------------------------------- typed text
     fun handle(c: Context, raw: String, onInterim: ((String) -> Unit)? = null): String =
         try {
+            lastSuggest = ""
             if (raw.isBlank()) "" else (tryLocal(c, raw) ?: chat(c, raw.trim(), onInterim))
         } catch (e: Exception) { "Error: ${e.message}" }
 
     // ---------------------------------------------------------------- spoken audio
     /** Returns (what you said, Jarvis's answer). localText is the instant offline transcript, if there is one. Throws on errors. */
     fun handleAudio(c: Context, wav: ByteArray, localTexts: List<String>, onInterim: ((String) -> Unit)? = null): Pair<String, String> {
+        lastSuggest = ""
         // 1) instant: try the offline transcripts first, so "open instagram" runs at once
         for (localText in localTexts) {
             if (localText.isBlank()) continue
@@ -149,11 +154,12 @@ object Brain {
             val v = j.optString(k, "").trim()
             return if (v == "null") "" else v
         }
-        return Ans(s("heard"), s("reply"), s("action"), s("arg"))
+        return Ans(s("heard"), s("reply"), s("action"), s("arg"), s("suggest"))
     }
 
     /** Runs a phone action or a web search if the AI asked for one, and reports what REALLY happened. */
     private fun finish(c: Context, a: Ans, userText: String, onInterim: ((String) -> Unit)?): String {
+        if (a.suggest.isNotBlank()) lastSuggest = a.suggest
         if (a.action.trim().lowercase() == "search") {
             onInterim?.invoke(a.reply.ifBlank { "Let me check that, Boss." })
             return searchWeb(c, a.arg.ifBlank { userText })
@@ -203,41 +209,111 @@ object Brain {
     }
 
     // ---------------------------------------------------------------- Gemini call (tries several model names)
-    private fun generate(c: Context, contents: JSONArray, cfg: JSONObject, useSearch: Boolean = false): String {
+    private fun httpGet(url: String, key: String): String {
+        val con = URL(url).openConnection() as HttpURLConnection
+        con.connectTimeout = 6000
+        con.readTimeout = 10000
+        con.setRequestProperty("x-goog-api-key", key)
+        val code = con.responseCode
+        val stream = if (code in 200..299) con.inputStream else con.errorStream
+        val text = stream?.bufferedReader()?.readText() ?: ""
+        if (code !in 200..299) throw HttpError(code, text.take(200))
+        return text
+    }
+
+    /** Asks Google which Gemini "flash" models this key can use, newest first. */
+    private fun discoverModels(key: String): List<String> {
+        val res = httpGet("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", key)
+        val arr = JSONObject(res).optJSONArray("models") ?: return emptyList()
+        class M(val name: String, val ver: Int, val lite: Boolean)
+        val list = ArrayList<M>()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val name = o.optString("name").removePrefix("models/")
+            val methods = o.optJSONArray("supportedGenerationMethods") ?: continue
+            var ok = false
+            for (j in 0 until methods.length()) if (methods.getString(j) == "generateContent") ok = true
+            if (!ok) continue
+            val m = Regex("^gemini-(\\d+)(?:\\.(\\d+))?-flash(-lite)?$").find(name) ?: continue
+            val ver = m.groupValues[1].toInt() * 100 + (m.groupValues[2].toIntOrNull() ?: 0)
+            list.add(M(name, ver, m.groupValues[3].isNotEmpty()))
+        }
+        list.sortWith(compareByDescending<M> { it.ver }.thenBy { it.lite })
+        return list.map { it.name }.take(3)
+    }
+
+    private fun modelList(c: Context, key: String, force: Boolean): List<String> {
+        val p = prefs(c)
+        val custom = p.getString("model", "")?.trim() ?: ""
+        var cached = (p.getString("models_cache", "") ?: "").split(",").filter { it.isNotBlank() }
+        val age = System.currentTimeMillis() - p.getLong("models_time", 0L)
+        if (force || cached.isEmpty() || age > 24L * 3600L * 1000L) {
+            try {
+                val found = discoverModels(key)
+                if (found.isNotEmpty()) {
+                    cached = found
+                    p.edit().putString("models_cache", found.joinToString(",")).putLong("models_time", System.currentTimeMillis()).apply()
+                }
+            } catch (_: Exception) {}
+        }
+        val out = ArrayList<String>()
+        if (custom.isNotEmpty()) out.add(custom)
+        for (m in cached) if (m !in out) out.add(m)
+        if (out.isEmpty()) out.addAll(FALLBACK)
+        return out
+    }
+
+    /** Refreshes the list of usable AI models in the background (so the first answer is not delayed). */
+    fun refreshModels(c: Context) {
+        val key = prefs(c).getString("gemini", "")?.trim() ?: ""
+        if (key.isEmpty()) return
+        Thread { try { modelList(c, key, true) } catch (_: Exception) {} }.start()
+    }
+
+    private fun generate(c: Context, contents: JSONArray, cfg: JSONObject, useSearch: Boolean = false, refreshed: Boolean = false): String {
         val key = prefs(c).getString("gemini", "")?.trim() ?: ""
         if (key.isEmpty()) throw Exception("Add your Gemini key in settings first.")
-
-        val custom = prefs(c).getString("model", "")?.trim() ?: ""
-        val tries = ArrayList<String>()
-        if (custom.isNotEmpty()) tries.add(custom)
-        for (m in FALLBACK) if (m !in tries) tries.add(m)
-        val chosen = tries.take(2)
+        val models = modelList(c, key, refreshed).take(3)
 
         val started = SystemClock.elapsedRealtime()
         var last: Exception? = null
-        for (m in chosen) {
+        var gone = false
+        for (m in models) {
             if (SystemClock.elapsedRealtime() - started > 20000) break
-            try {
-                val conf = JSONObject(cfg.toString())
-                if (m.startsWith("gemini-2.5-flash")) conf.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
-                val bodyJson = JSONObject()
-                    .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemText()))))
-                    .put("contents", contents)
-                    .put("generationConfig", conf)
-                if (useSearch) bodyJson.put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
-                val res = post("https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent", key, bodyJson.toString().toByteArray())
-                val secs = (SystemClock.elapsedRealtime() - started) / 100 / 10.0
-                lastTiming = "AI ${secs}s ($m)"
-                return extract(res)
-            } catch (e: HttpError) {
-                last = e
-                val tryNext = e.code == 404 || e.code == 429 || e.code >= 500 ||
-                        (e.code == 400 && e.msg.contains("not found", ignoreCase = true))
-                if (!tryNext) throw e
-            } catch (e: java.io.IOException) {
-                last = e
+            var think = true
+            var attempts = 0
+            while (attempts < 2) {
+                attempts++
+                try {
+                    val conf = JSONObject(cfg.toString())
+                    if (think) {
+                        if (m.startsWith("gemini-2.5")) conf.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+                        else if (m.startsWith("gemini-3")) conf.put("thinkingConfig", JSONObject().put("thinkingLevel", "minimal"))
+                    }
+                    val bodyJson = JSONObject()
+                        .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", systemText()))))
+                        .put("contents", contents)
+                        .put("generationConfig", conf)
+                    if (useSearch) bodyJson.put("tools", JSONArray().put(JSONObject().put("google_search", JSONObject())))
+                    val res = post("https://generativelanguage.googleapis.com/v1beta/models/$m:generateContent", key, bodyJson.toString().toByteArray())
+                    val secs = (SystemClock.elapsedRealtime() - started) / 100 / 10.0
+                    lastTiming = "AI ${secs}s ($m)"
+                    return extract(res)
+                } catch (e: HttpError) {
+                    last = e
+                    if (e.code == 400 && think && e.msg.contains("think", ignoreCase = true)) { think = false; continue }
+                    val tryNext = e.code == 404 || e.code == 429 || e.code >= 500 ||
+                            (e.code == 400 && e.msg.contains("not found", ignoreCase = true))
+                    if (e.code == 404) gone = true
+                    if (!tryNext) throw e
+                    break
+                } catch (e: java.io.IOException) {
+                    last = e
+                    break
+                }
             }
         }
+        if (gone && !refreshed) return generate(c, contents, cfg, useSearch, true)
         val msg = last?.message ?: "no answer"
         throw Exception("The AI did not answer in time ($msg). Check your internet connection.")
     }
@@ -272,7 +348,24 @@ object Brain {
     }
 
     // ---------------------------------------------------------------- local commands (instant, no internet, no AI)
+    private fun localSuggest(t: String): String = when {
+        t.contains("insta") || t.contains("reel") -> "scroll instagram every 6 seconds"
+        t.contains("call") -> "speaker on"
+        t.contains("song") || t.contains("music") || t.startsWith("play") -> "next song"
+        t.contains("volume") -> "volume max"
+        t.contains("brightness") -> "brightness max"
+        t.contains("flash") || t.contains("torch") -> "turn off the flashlight"
+        t.startsWith("open") -> "what can you do"
+        else -> ""
+    }
+
     private fun tryLocal(c: Context, raw: String): String? {
+        val r = tryLocalCore(c, raw)
+        if (r != null) lastSuggest = localSuggest(raw.lowercase())
+        return r
+    }
+
+    private fun tryLocalCore(c: Context, raw: String): String? {
         var t = raw.lowercase().replace(Regex("[^a-z0-9 ]"), " ").replace(Regex("\\s+"), " ").trim()
         t = t.removePrefix("jarvis").trim()
         if (t.isEmpty()) return null
@@ -672,7 +765,14 @@ object Brain {
     private fun pressPlayLater(c: Context, ms: Long) {
         Thread {
             try { Thread.sleep(ms) } catch (_: Exception) {}
-            try { doMedia(c, "play") } catch (_: Exception) {}
+            var done = false
+            for (i in 0 until 14) {
+                if (JarvisAccess.inst?.clickPlay() == true) { done = true; break }
+                try { Thread.sleep(700) } catch (_: Exception) {}
+            }
+            if (!done) {
+                try { doMedia(c, "play") } catch (_: Exception) {}
+            }
         }.start()
     }
 
